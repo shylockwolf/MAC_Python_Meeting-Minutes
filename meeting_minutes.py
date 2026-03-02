@@ -10,6 +10,11 @@ import multiprocessing as mp
 from multiprocessing import Queue, Process
 import mlx_whisper
 from pathlib import Path
+from dotenv import load_dotenv
+from openai import OpenAI
+
+# 加载环境变量
+load_dotenv()
 
 def get_audio_duration(audio_path):
     try:
@@ -231,6 +236,7 @@ class MeetingMinutesApp:
                     chars = len(content)
                     self.log(f"文件行数: {lines}, 字符数: {chars}")
                     self.format_button.config(state=tk.NORMAL)
+                    self.minutes_button.config(state=tk.NORMAL)
             except Exception as e:
                 self.log(f"读取文件失败: {e}")
                 messagebox.showerror("错误", f"读取文件失败: {e}")
@@ -239,26 +245,363 @@ class MeetingMinutesApp:
         if not hasattr(self, 'current_text_content'):
             messagebox.showwarning("警告", "请先选择文本文件")
             return
-            
+        
+        # 获取 API 密钥
+        api_key = os.getenv('DEEPSEEK_API_KEY')
+        if not api_key or api_key == 'your_deepseek_api_key_here':
+            messagebox.showerror("错误", "请先配置 DeepSeek API 密钥到 .env 文件")
+            return
+        
         self.log(f"\n{'='*50}")
         self.log("开始成文处理...")
         self.log(f"{'='*50}\n")
         
-        # TODO: 实现成文逻辑
-        self.log("成文功能待实现")
-        self.minutes_button.config(state=tk.NORMAL)
+        # 禁用按钮
+        self.format_button.config(state=tk.DISABLED)
+        self.open_text_button.config(state=tk.DISABLED)
+        
+        # 在新线程中调用 API
+        thread = threading.Thread(target=self._call_deepseek_for_formatting)
+        thread.daemon = True
+        thread.start()
+    
+    def _call_deepseek_for_formatting(self):
+        try:
+            api_key = os.getenv('DEEPSEEK_API_KEY')
+            api_url = os.getenv('DEEPSEEK_API_URL', 'https://api.deepseek.com/v1')
+            model = os.getenv('DEEPSEEK_MODEL', 'deepseek-chat')
+            
+            self.log("正在连接 DeepSeek API...")
+            
+            client = OpenAI(
+                api_key=api_key,
+                base_url=api_url
+            )
+            
+            # 估算每段最大字符数（预留空间给提示词和输出）
+            # DeepSeek 最大 32K tokens，约 24K 汉字
+            # 预留 4K 给提示词和输出，每段约 20K 字符
+            MAX_CHARS_PER_CHUNK = 15000  # 保守估计，每段1.5万字符
+            
+            content = self.current_text_content
+            content_length = len(content)
+            
+            self.log(f"原始文本长度: {content_length} 字符")
+            
+            # 如果文本较短，直接处理
+            if content_length <= MAX_CHARS_PER_CHUNK:
+                self.log("文本较短，直接处理...")
+                formatted_text = self._process_text_chunk(client, model, content, 1, 1)
+            else:
+                # 分段处理
+                chunks = self._split_text_into_chunks(content, MAX_CHARS_PER_CHUNK)
+                total_chunks = len(chunks)
+                self.log(f"文本较长，分成 {total_chunks} 段处理...")
+                
+                formatted_chunks = []
+                for i, chunk in enumerate(chunks, 1):
+                    self.log(f"\n处理第 {i}/{total_chunks} 段...")
+                    formatted_chunk = self._process_text_chunk(client, model, chunk, i, total_chunks)
+                    formatted_chunks.append(formatted_chunk)
+                
+                # 合并所有段
+                self.log(f"\n合并 {total_chunks} 段结果...")
+                formatted_text = "\n\n".join(formatted_chunks)
+            
+            self.log(f"✓ 成文处理完成，总长度: {len(formatted_text)} 字符")
+            
+            # 保存成文后的文件
+            self._save_formatted_text(formatted_text)
+            
+            # 更新状态
+            self.root.after(0, lambda: self.minutes_button.config(state=tk.NORMAL))
+            self.root.after(0, lambda: self.open_text_button.config(state=tk.NORMAL))
+            
+        except Exception as e:
+            self.log(f"成文处理失败: {e}")
+            import traceback
+            self.log(f"错误详情: {traceback.format_exc()}")
+            self.root.after(0, lambda: messagebox.showerror("错误", f"成文处理失败: {e}"))
+            self.root.after(0, lambda: self.format_button.config(state=tk.NORMAL))
+            self.root.after(0, lambda: self.open_text_button.config(state=tk.NORMAL))
+    
+    def _split_text_into_chunks(self, text, max_chars):
+        """将文本分割成多个块，尽量在句子边界处分割"""
+        lines = text.split('\n')
+        chunks = []
+        current_chunk = []
+        current_length = 0
+        
+        for line in lines:
+            line_length = len(line)
+            
+            # 如果当前行加上去会超过限制，先保存当前块
+            if current_length + line_length > max_chars and current_chunk:
+                chunks.append('\n'.join(current_chunk))
+                current_chunk = []
+                current_length = 0
+            
+            current_chunk.append(line)
+            current_length += line_length + 1  # +1 for newline
+        
+        # 添加最后一个块
+        if current_chunk:
+            chunks.append('\n'.join(current_chunk))
+        
+        return chunks
+    
+    def _process_text_chunk(self, client, model, chunk, chunk_index, total_chunks):
+        """处理单个文本块"""
+        prompt = """以下是音频转文字的原始文件，请做一下处理：
+1、去掉时间戳
+2、按语义拼接成合理的句子和段落，并增加标点符号
+3、按简体中文输出
+4、保持段落结构清晰
+
+原始文本：
+"""
+        
+        full_prompt = prompt + chunk
+        
+        self.log(f"  发送请求 (长度: {len(full_prompt)} 字符)...")
+        
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "你是一个专业的文本编辑助手，擅长整理和优化语音转文字的文本。"},
+                    {"role": "user", "content": full_prompt}
+                ],
+                temperature=0.7,
+                max_tokens=16000,  # 增加到最大限制
+                timeout=180  # 增加到3分钟
+            )
+            
+            formatted_text = response.choices[0].message.content
+            
+            if not formatted_text or len(formatted_text.strip()) == 0:
+                self.log("  警告: API 返回内容为空")
+                if hasattr(response.choices[0].message, 'reasoning_content'):
+                    formatted_text = response.choices[0].message.reasoning_content
+            
+            self.log(f"  ✓ 完成，返回长度: {len(formatted_text)} 字符")
+            return formatted_text
+            
+        except Exception as e:
+            self.log(f"  ✗ 调用失败: {e}")
+            # 尝试使用备用模型
+            if model != 'deepseek-chat':
+                self.log("  尝试使用 deepseek-chat 模型...")
+                response = client.chat.completions.create(
+                    model='deepseek-chat',
+                    messages=[
+                        {"role": "system", "content": "你是一个专业的文本编辑助手，擅长整理和优化语音转文字的文本。"},
+                        {"role": "user", "content": full_prompt}
+                    ],
+                    temperature=0.7,
+                    max_tokens=16000,
+                    timeout=180
+                )
+                formatted_text = response.choices[0].message.content
+                self.log(f"  ✓ 备用模型完成，返回长度: {len(formatted_text)} 字符")
+                return formatted_text
+            else:
+                raise
+    
+    def _save_formatted_text(self, formatted_text):
+        try:
+            # 生成输出文件名：源文件名字_成文.txt
+            input_path = Path(self.current_text_path)
+            output_path = input_path.parent / f"{input_path.stem}_成文.txt"
+            
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(formatted_text)
+            
+            self.log(f"\n✓ 成文结果已保存到: {output_path}")
+            
+            # 保存成文后的内容，供生成会议纪要使用
+            self.formatted_text_content = formatted_text
+            self.formatted_text_path = str(output_path)
+            
+        except Exception as e:
+            self.log(f"保存成文文件失败: {e}")
+            raise
         
     def generate_minutes(self):
         if not hasattr(self, 'current_text_content'):
-            messagebox.showwarning("警告", "请先选择文本文件并完成成文")
+            messagebox.showwarning("警告", "请先选择文本文件")
             return
-            
+        
+        # 获取 API 密钥
+        api_key = os.getenv('DEEPSEEK_API_KEY')
+        if not api_key or api_key == 'your_deepseek_api_key_here':
+            messagebox.showerror("错误", "请先配置 DeepSeek API 密钥到 .env 文件")
+            return
+        
+        # 加载提示词文件
+        prompt_file = Path(__file__).parent / "会议纪要提示词.txt"
+        if not prompt_file.exists():
+            messagebox.showerror("错误", f"找不到提示词文件: {prompt_file}")
+            return
+        
+        try:
+            with open(prompt_file, 'r', encoding='utf-8') as f:
+                prompt_template = f.read()
+        except Exception as e:
+            messagebox.showerror("错误", f"读取提示词文件失败: {e}")
+            return
+        
         self.log(f"\n{'='*50}")
         self.log("生成会议纪要...")
         self.log(f"{'='*50}\n")
+        self.log(f"已加载提示词模板: {prompt_file}")
         
-        # TODO: 实现会议纪要生成逻辑
-        self.log("会议纪要生成功能待实现")
+        # 禁用按钮
+        self.minutes_button.config(state=tk.DISABLED)
+        self.open_text_button.config(state=tk.DISABLED)
+        self.format_button.config(state=tk.DISABLED)
+        
+        # 在新线程中调用 API
+        thread = threading.Thread(target=self._call_deepseek_for_minutes, args=(prompt_template,))
+        thread.daemon = True
+        thread.start()
+    
+    def _call_deepseek_for_minutes(self, prompt_template):
+        try:
+            api_key = os.getenv('DEEPSEEK_API_KEY')
+            api_url = os.getenv('DEEPSEEK_API_URL', 'https://api.deepseek.com/v1')
+            model = os.getenv('DEEPSEEK_MODEL', 'deepseek-chat')
+            
+            self.log("正在连接 DeepSeek API...")
+            
+            client = OpenAI(
+                api_key=api_key,
+                base_url=api_url
+            )
+            
+            # 使用成文后的内容，如果没有则使用原始内容
+            content = getattr(self, 'formatted_text_content', self.current_text_content)
+            content_length = len(content)
+            
+            self.log(f"文本长度: {content_length} 字符")
+            
+            # 估算每段最大字符数
+            MAX_CHARS_PER_CHUNK = 12000  # 会议纪要需要更多token，减小每段大小
+            
+            # 如果文本较短，直接处理
+            if content_length <= MAX_CHARS_PER_CHUNK:
+                self.log("文本较短，直接生成会议纪要...")
+                minutes_text = self._process_minutes_chunk(client, model, prompt_template, content, 1, 1)
+            else:
+                # 分段处理
+                chunks = self._split_text_into_chunks(content, MAX_CHARS_PER_CHUNK)
+                total_chunks = len(chunks)
+                self.log(f"文本较长，分成 {total_chunks} 段处理...")
+                
+                minutes_parts = []
+                for i, chunk in enumerate(chunks, 1):
+                    self.log(f"\n处理第 {i}/{total_chunks} 段...")
+                    part = self._process_minutes_chunk(client, model, prompt_template, chunk, i, total_chunks)
+                    minutes_parts.append(part)
+                
+                # 合并所有段
+                self.log(f"\n合并 {total_chunks} 段结果...")
+                minutes_text = "\n\n".join(minutes_parts)
+            
+            self.log(f"✓ 会议纪要生成完成，总长度: {len(minutes_text)} 字符")
+            
+            # 保存会议纪要
+            self._save_minutes(minutes_text)
+            
+            # 更新状态
+            self.root.after(0, lambda: self.open_text_button.config(state=tk.NORMAL))
+            self.root.after(0, lambda: self.format_button.config(state=tk.NORMAL))
+            
+        except Exception as e:
+            self.log(f"生成会议纪要失败: {e}")
+            import traceback
+            self.log(f"错误详情: {traceback.format_exc()}")
+            self.root.after(0, lambda: messagebox.showerror("错误", f"生成会议纪要失败: {e}"))
+            self.root.after(0, lambda: self.open_text_button.config(state=tk.NORMAL))
+            self.root.after(0, lambda: self.format_button.config(state=tk.NORMAL))
+    
+    def _process_minutes_chunk(self, client, model, prompt_template, chunk, chunk_index, total_chunks):
+        """处理单个文本块生成会议纪要"""
+        full_prompt = prompt_template + chunk
+        
+        if total_chunks > 1:
+            self.log(f"  处理第 {chunk_index} 部分...")
+        
+        self.log(f"  发送请求 (长度: {len(full_prompt)} 字符)...")
+        
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "你是一个专业的会议记录员，擅长从会议文本中提取关键信息并生成结构化的会议纪要。"},
+                    {"role": "user", "content": full_prompt}
+                ],
+                temperature=0.7,
+                max_tokens=16000,
+                timeout=180
+            )
+            
+            minutes_text = response.choices[0].message.content
+            
+            if not minutes_text or len(minutes_text.strip()) == 0:
+                self.log("  警告: API 返回内容为空")
+                if hasattr(response.choices[0].message, 'reasoning_content'):
+                    minutes_text = response.choices[0].message.reasoning_content
+            
+            self.log(f"  ✓ 完成，返回长度: {len(minutes_text)} 字符")
+            return minutes_text
+            
+        except Exception as e:
+            self.log(f"  ✗ 调用失败: {e}")
+            # 尝试使用备用模型
+            if model != 'deepseek-chat':
+                self.log("  尝试使用 deepseek-chat 模型...")
+                response = client.chat.completions.create(
+                    model='deepseek-chat',
+                    messages=[
+                        {"role": "system", "content": "你是一个专业的会议记录员，擅长从会议文本中提取关键信息并生成结构化的会议纪要。"},
+                        {"role": "user", "content": full_prompt}
+                    ],
+                    temperature=0.7,
+                    max_tokens=16000,
+                    timeout=180
+                )
+                minutes_text = response.choices[0].message.content
+                self.log(f"  ✓ 备用模型完成，返回长度: {len(minutes_text)} 字符")
+                return minutes_text
+            else:
+                raise
+    
+    def _save_minutes(self, minutes_text):
+        """保存会议纪要到 Markdown 文件"""
+        try:
+            # 生成输出文件名：源文件名字_纪要.md
+            input_path = Path(self.current_text_path)
+            output_path = input_path.parent / f"{input_path.stem}_纪要.md"
+            
+            # 如果文件已存在，添加序号
+            counter = 1
+            original_output_path = output_path
+            while output_path.exists():
+                output_path = input_path.parent / f"{input_path.stem}_纪要_{counter}.md"
+                counter += 1
+            
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(minutes_text)
+            
+            self.log(f"\n✓ 会议纪要已保存到: {output_path}")
+            
+            if output_path != original_output_path:
+                self.log(f"  (原文件已存在，使用新文件名)")
+            
+        except Exception as e:
+            self.log(f"保存会议纪要失败: {e}")
+            raise
             
     def start_transcription(self):
         if not self.current_audio_path:
