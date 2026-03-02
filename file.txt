@@ -1,0 +1,73 @@
+
+我要做一个会议纪要的python程序，下面先完成第一步：语音转文字
+现在需要一个图形界面，
+包含一个打开文件的按钮，可以选择输入的音频文件
+一个中断按钮，可以中断现有的操作
+一个显示空间，可以滚动，把转换的整个过程实时显示出来
+
+
+
+我的模型采用 whisper-small-mlx，安装目录 /Users/noone/Movies/myMLX/whisper-small-mlx
+输出文件和输入文件同名 同目录  txt结尾
+
+
+
+
+
+
+
+
+
+
+语音模型调用规范
+import mlx_whisper
+
+# 使用绝对路径指定模型位置
+result = mlx_whisper.transcribe(
+    "audio.mp3",
+    path_or_hf_repo="/Users/noone/Movies/myMLX/whisper-small-mlx",
+    language="zh"
+)
+
+print(result["text"])
+
+处理超长音频的实例
+========================================================
+import mlx_whisper
+import time
+
+def transcribe_audio(audio_path, model="whisper-small-mlx", language="zh"):
+    start_time = time.time()
+    
+    print(f"正在处理音频: {audio_path}")
+    
+    try:
+        result = mlx_whisper.transcribe(
+            audio_path,
+            model=model,
+            language=language,
+            word_timestamps=True,
+            fp16=True
+        )
+        
+        processing_time = time.time() - start_time
+        total_duration = result['segments'][-1]['end'] if result['segments'] else 0
+        
+        print(f"\n处理完成！")
+        print(f"音频时长: {total_duration:.2f} 秒 ({total_duration/60:.2f} 分钟)")
+        print(f"处理时间: {processing_time:.2f} 秒")
+        print(f"处理速度: {total_duration/processing_time:.2f}x 实时速度")
+        print(f"分段数量: {len(result['segments'])}")
+        
+        return result
+        
+    except Exception as e:
+        print(f"处理失败: {e}")
+        return None
+
+# 使用示例
+result = transcribe_audio("your_audio.mp3")
+
+if result:
+    print("\n--- 转录结果 ---")
+    print(result["text"])
