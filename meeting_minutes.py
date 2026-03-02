@@ -485,33 +485,42 @@ class MeetingMinutesApp:
             
             self.log(f"文本长度: {content_length} 字符")
             
-            # 估算每段最大字符数
-            MAX_CHARS_PER_CHUNK = 12000  # 会议纪要需要更多token，减小每段大小
+            # 64K tokens 约等于 48K 汉字（1 token ≈ 0.75 汉字）
+            # 预留空间给输出，设置阈值为 45000 字符
+            MAX_CHARS_THRESHOLD = 45000
             
             # 如果文本较短，直接处理
-            if content_length <= MAX_CHARS_PER_CHUNK:
+            if content_length <= MAX_CHARS_THRESHOLD:
                 self.log("文本较短，直接生成会议纪要...")
-                minutes_text = self._process_minutes_chunk(client, model, prompt_template, content, 1, 1)
+                minutes_text = self._process_minutes_full(client, model, prompt_template, content)
+                self._save_minutes(minutes_text)
             else:
-                # 分段处理
-                chunks = self._split_text_into_chunks(content, MAX_CHARS_PER_CHUNK)
+                # 两阶段处理：先生成摘要，再整合
+                self.log(f"文本较长({content_length}字符)，使用两阶段处理...")
+                
+                # 第一阶段：分段生成结构摘要
+                chunk_size = 15000  # 每段约15000字符
+                chunks = self._split_text_into_chunks(content, chunk_size)
                 total_chunks = len(chunks)
-                self.log(f"文本较长，分成 {total_chunks} 段处理...")
                 
-                minutes_parts = []
+                self.log(f"\n第一阶段：生成段落摘要，共 {total_chunks} 段...")
+                
+                summaries = []
+                
                 for i, chunk in enumerate(chunks, 1):
-                    self.log(f"\n处理第 {i}/{total_chunks} 段...")
-                    part = self._process_minutes_chunk(client, model, prompt_template, chunk, i, total_chunks)
-                    minutes_parts.append(part)
+                    self.log(f"\n  处理第 {i}/{total_chunks} 段...")
+                    summary = self._generate_chunk_summary(client, model, chunk, i)
+                    summaries.append(summary)
                 
-                # 合并所有段
-                self.log(f"\n合并 {total_chunks} 段结果...")
-                minutes_text = "\n\n".join(minutes_parts)
-            
-            self.log(f"✓ 会议纪要生成完成，总长度: {len(minutes_text)} 字符")
-            
-            # 保存会议纪要
-            self._save_minutes(minutes_text)
+                # 第二阶段：全局整合
+                self.log(f"\n第二阶段：全局整合 {total_chunks} 段摘要...")
+                all_summaries = "\n\n".join([f"=== 第 {i+1} 段摘要 ===\n{s}" for i, s in enumerate(summaries)])
+                minutes_text = self._integrate_summaries(client, model, prompt_template, all_summaries)
+                
+                self.log(f"✓ 会议纪要生成完成，总长度: {len(minutes_text)} 字符")
+                
+                # 保存会议纪要
+                self._save_minutes(minutes_text)
             
             # 更新状态
             self.root.after(0, lambda: self.open_text_button.config(state=tk.NORMAL))
@@ -525,12 +534,129 @@ class MeetingMinutesApp:
             self.root.after(0, lambda: self.open_text_button.config(state=tk.NORMAL))
             self.root.after(0, lambda: self.format_button.config(state=tk.NORMAL))
     
-    def _process_minutes_chunk(self, client, model, prompt_template, chunk, chunk_index, total_chunks):
-        """处理单个文本块生成会议纪要"""
-        full_prompt = prompt_template + chunk
+    def _generate_chunk_summary(self, client, model, chunk, chunk_index):
+        """生成段落结构摘要"""
+        summary_prompt = """请总结本段会议内容，按以下格式输出：
+
+- 本段议题：[简要描述本段讨论的议题]
+- 本段形成的结论：[列出本段达成的结论，如无则写"无"]
+- 本段产生的行动项：[列出具体的行动项，格式：任务 - 负责人 - 截止时间，如无则写"无"]
+- 未解决问题：[列出本段提出但未解决的问题，如无则写"无"]
+
+会议内容：
+"""
         
-        if total_chunks > 1:
-            self.log(f"  处理第 {chunk_index} 部分...")
+        full_prompt = summary_prompt + chunk
+        
+        self.log(f"    发送摘要请求 (长度: {len(full_prompt)} 字符)...")
+        
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "你是一个专业的会议分析助手，擅长提取会议关键信息。"},
+                    {"role": "user", "content": full_prompt}
+                ],
+                temperature=0.7,
+                max_tokens=8000,
+                timeout=120
+            )
+            
+            summary = response.choices[0].message.content
+            
+            if not summary or len(summary.strip()) == 0:
+                self.log("    警告: API 返回内容为空")
+                if hasattr(response.choices[0].message, 'reasoning_content'):
+                    summary = response.choices[0].message.reasoning_content
+            
+            self.log(f"    ✓ 摘要完成，长度: {len(summary)} 字符")
+            return summary
+            
+        except Exception as e:
+            self.log(f"    ✗ 摘要生成失败: {e}")
+            # 尝试使用备用模型
+            if model != 'deepseek-chat':
+                self.log("    尝试使用 deepseek-chat 模型...")
+                response = client.chat.completions.create(
+                    model='deepseek-chat',
+                    messages=[
+                        {"role": "system", "content": "你是一个专业的会议分析助手，擅长提取会议关键信息。"},
+                        {"role": "user", "content": full_prompt}
+                    ],
+                    temperature=0.7,
+                    max_tokens=8000,
+                    timeout=120
+                )
+                summary = response.choices[0].message.content
+                self.log(f"    ✓ 备用模型完成，长度: {len(summary)} 字符")
+                return summary
+            else:
+                raise
+    
+    def _integrate_summaries(self, client, model, prompt_template, all_summaries):
+        """整合所有摘要生成完整会议纪要"""
+        integrate_prompt = """以下是会议的分段摘要，请合并为一份完整的会议纪要：
+
+要求：
+1. 去重行动项（相同或相似的任务只保留一条）
+2. 合并重复议题（将相同主题的讨论合并）
+3. 保留所有决策（不要遗漏任何决定）
+4. 按逻辑重组内容，确保条理清晰
+5. 使用正式的会议纪要格式
+
+分段摘要：
+"""
+        
+        full_prompt = integrate_prompt + all_summaries + "\n\n" + prompt_template
+        
+        self.log(f"  发送整合请求 (摘要总长度: {len(all_summaries)} 字符)...")
+        
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "你是一个专业的会议记录员，擅长整合信息并生成结构化的会议纪要。"},
+                    {"role": "user", "content": full_prompt}
+                ],
+                temperature=0.7,
+                max_tokens=16000,
+                timeout=180
+            )
+            
+            minutes_text = response.choices[0].message.content
+            
+            if not minutes_text or len(minutes_text.strip()) == 0:
+                self.log("  警告: API 返回内容为空")
+                if hasattr(response.choices[0].message, 'reasoning_content'):
+                    minutes_text = response.choices[0].message.reasoning_content
+            
+            self.log(f"  ✓ 整合完成，会议纪要长度: {len(minutes_text)} 字符")
+            return minutes_text
+            
+        except Exception as e:
+            self.log(f"  ✗ 整合失败: {e}")
+            # 尝试使用备用模型
+            if model != 'deepseek-chat':
+                self.log("  尝试使用 deepseek-chat 模型...")
+                response = client.chat.completions.create(
+                    model='deepseek-chat',
+                    messages=[
+                        {"role": "system", "content": "你是一个专业的会议记录员，擅长整合信息并生成结构化的会议纪要。"},
+                        {"role": "user", "content": full_prompt}
+                    ],
+                    temperature=0.7,
+                    max_tokens=16000,
+                    timeout=180
+                )
+                minutes_text = response.choices[0].message.content
+                self.log(f"  ✓ 备用模型完成，长度: {len(minutes_text)} 字符")
+                return minutes_text
+            else:
+                raise
+    
+    def _process_minutes_full(self, client, model, prompt_template, content):
+        """直接处理完整文本生成会议纪要（短文本用）"""
+        full_prompt = prompt_template + content
         
         self.log(f"  发送请求 (长度: {len(full_prompt)} 字符)...")
         
