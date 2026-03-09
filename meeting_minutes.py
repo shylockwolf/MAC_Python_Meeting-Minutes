@@ -151,7 +151,7 @@ class MeetingMinutesApp:
         self.stop_button = tk.Button(audio_frame, text="中断", command=self.stop_transcription, width=15, state=tk.DISABLED)
         self.stop_button.pack(side=tk.LEFT, padx=5)
 
-        self.one_click_button = tk.Button(audio_frame, text="一键生成", command=self.one_click_generate, width=15, state=tk.DISABLED)
+        self.one_click_button = tk.Button(audio_frame, text="一键生成会议纪要", command=self.one_click_generate, width=15, state=tk.DISABLED)
         self.one_click_button.pack(side=tk.LEFT, padx=5)
         
         # 第二行按钮 - 文本处理
@@ -166,7 +166,10 @@ class MeetingMinutesApp:
         
         self.minutes_button = tk.Button(text_frame, text="生成会议纪要", command=self.generate_minutes, width=15, state=tk.DISABLED)
         self.minutes_button.pack(side=tk.LEFT, padx=5)
-        
+
+        self.podcast_button = tk.Button(text_frame, text="生成播客", command=self.generate_podcast, width=15, state=tk.DISABLED)
+        self.podcast_button.pack(side=tk.LEFT, padx=5)
+
         self.status_label = tk.Label(self.root, text="请选择音频文件或文本文件", pady=5)
         self.status_label.pack()
         
@@ -180,7 +183,7 @@ class MeetingMinutesApp:
         
     def open_file(self):
         if self.transcribing:
-            messagebox.showwarning("警告", "正在处理中，请先中断当前操作")
+            self.log("警告: 正在处理中，请先中断当前操作")
             return
             
         file_path = filedialog.askopenfilename(
@@ -217,26 +220,26 @@ class MeetingMinutesApp:
     def one_click_generate(self):
         """一键生成：转录 -> 成文 -> 生成会议纪要"""
         if not self.current_audio_path:
-            messagebox.showwarning("警告", "请先选择音频文件")
+            self.log("警告: 请先选择音频文件")
             return
 
         # 获取 API 密钥
         api_key = os.getenv('DEEPSEEK_API_KEY')
         if not api_key or api_key == 'your_deepseek_api_key_here':
-            messagebox.showerror("错误", "请先配置 DeepSeek API 密钥到 .env 文件")
+            self.log("错误: 请先配置 DeepSeek API 密钥到 .env 文件")
             return
 
         # 加载提示词文件
         prompt_file = Path(__file__).parent / "会议纪要提示词.txt"
         if not prompt_file.exists():
-            messagebox.showerror("错误", f"找不到提示词文件: {prompt_file}")
+            self.log(f"错误: 找不到提示词文件: {prompt_file}")
             return
 
         try:
             with open(prompt_file, 'r', encoding='utf-8') as f:
                 self.minutes_prompt_template = f.read()
         except Exception as e:
-            messagebox.showerror("错误", f"读取提示词文件失败: {e}")
+            self.log(f"错误: 读取提示词文件失败: {e}")
             return
 
         self.log(f"\n{'='*50}")
@@ -340,7 +343,7 @@ class MeetingMinutesApp:
             self.log(f"成文处理失败: {e}")
             import traceback
             self.log(f"错误详情: {traceback.format_exc()}")
-            self.root.after(0, lambda: messagebox.showerror("错误", f"成文处理失败: {e}"))
+            self.log(f"错误: 成文处理失败: {e}")
             self.root.after(0, self._reset_one_click_mode)
 
     def _process_formatting_chunk(self, client, model, chunk, chunk_index, total_chunks):
@@ -504,7 +507,7 @@ class MeetingMinutesApp:
             self.log(f"生成会议纪要失败: {e}")
             import traceback
             self.log(f"错误详情: {traceback.format_exc()}")
-            self.root.after(0, lambda: messagebox.showerror("错误", f"生成会议纪要失败: {e}"))
+            self.log(f"错误: 生成会议纪要失败: {e}")
             self.root.after(0, self._reset_one_click_mode)
 
     def _reset_one_click_mode(self):
@@ -521,9 +524,9 @@ class MeetingMinutesApp:
 
     def open_text_file(self):
         if self.transcribing:
-            messagebox.showwarning("警告", "正在处理中，请先中断当前操作")
+            self.log("警告: 正在处理中，请先中断当前操作")
             return
-            
+
         file_path = filedialog.askopenfilename(
             title="选择文本文件",
             filetypes=[
@@ -531,12 +534,12 @@ class MeetingMinutesApp:
                 ("所有文件", "*.*")
             ]
         )
-        
+
         if file_path:
             self.current_text_path = file_path
             self.status_label.config(text=f"已选择文本: {os.path.basename(file_path)}")
             self.log(f"已选择文本文件: {file_path}")
-            
+
             try:
                 with open(file_path, 'r', encoding='utf-8') as f:
                     content = f.read()
@@ -546,19 +549,20 @@ class MeetingMinutesApp:
                     self.log(f"文件行数: {lines}, 字符数: {chars}")
                     self.format_button.config(state=tk.NORMAL)
                     self.minutes_button.config(state=tk.NORMAL)
+                    self.podcast_button.config(state=tk.NORMAL)
             except Exception as e:
                 self.log(f"读取文件失败: {e}")
-                messagebox.showerror("错误", f"读取文件失败: {e}")
+                self.log(f"错误: 读取文件失败: {e}")
                 
     def start_formatting(self):
         if not hasattr(self, 'current_text_content'):
-            messagebox.showwarning("警告", "请先选择文本文件")
+            self.log("警告: 请先选择文本文件")
             return
-        
+
         # 获取 API 密钥
         api_key = os.getenv('DEEPSEEK_API_KEY')
         if not api_key or api_key == 'your_deepseek_api_key_here':
-            messagebox.showerror("错误", "请先配置 DeepSeek API 密钥到 .env 文件")
+            self.log("错误: 请先配置 DeepSeek API 密钥到 .env 文件")
             return
         
         self.log(f"\n{'='*50}")
@@ -630,7 +634,7 @@ class MeetingMinutesApp:
             self.log(f"成文处理失败: {e}")
             import traceback
             self.log(f"错误详情: {traceback.format_exc()}")
-            self.root.after(0, lambda: messagebox.showerror("错误", f"成文处理失败: {e}"))
+            self.log(f"错误: 成文处理失败: {e}")
             self.root.after(0, lambda: self.format_button.config(state=tk.NORMAL))
             self.root.after(0, lambda: self.open_text_button.config(state=tk.NORMAL))
     
@@ -738,26 +742,26 @@ class MeetingMinutesApp:
         
     def generate_minutes(self):
         if not hasattr(self, 'current_text_content'):
-            messagebox.showwarning("警告", "请先选择文本文件")
+            self.log("警告: 请先选择文本文件")
             return
-        
+
         # 获取 API 密钥
         api_key = os.getenv('DEEPSEEK_API_KEY')
         if not api_key or api_key == 'your_deepseek_api_key_here':
-            messagebox.showerror("错误", "请先配置 DeepSeek API 密钥到 .env 文件")
+            self.log("错误: 请先配置 DeepSeek API 密钥到 .env 文件")
             return
-        
+
         # 加载提示词文件
         prompt_file = Path(__file__).parent / "会议纪要提示词.txt"
         if not prompt_file.exists():
-            messagebox.showerror("错误", f"找不到提示词文件: {prompt_file}")
+            self.log(f"错误: 找不到提示词文件: {prompt_file}")
             return
-        
+
         try:
             with open(prompt_file, 'r', encoding='utf-8') as f:
                 prompt_template = f.read()
         except Exception as e:
-            messagebox.showerror("错误", f"读取提示词文件失败: {e}")
+            self.log(f"错误: 读取提示词文件失败: {e}")
             return
         
         self.log(f"\n{'='*50}")
@@ -834,15 +838,220 @@ class MeetingMinutesApp:
             # 更新状态
             self.root.after(0, lambda: self.open_text_button.config(state=tk.NORMAL))
             self.root.after(0, lambda: self.format_button.config(state=tk.NORMAL))
-            
+
         except Exception as e:
             self.log(f"生成会议纪要失败: {e}")
             import traceback
             self.log(f"错误详情: {traceback.format_exc()}")
-            self.root.after(0, lambda: messagebox.showerror("错误", f"生成会议纪要失败: {e}"))
+            self.log(f"错误: 生成会议纪要失败: {e}")
             self.root.after(0, lambda: self.open_text_button.config(state=tk.NORMAL))
             self.root.after(0, lambda: self.format_button.config(state=tk.NORMAL))
-    
+
+    def generate_podcast(self):
+        if not hasattr(self, 'current_text_content'):
+            self.log("警告: 请先选择文本文件")
+            return
+
+        # 获取 API 密钥
+        api_key = os.getenv('DEEPSEEK_API_KEY')
+        if not api_key or api_key == 'your_deepseek_api_key_here':
+            self.log("错误: 请先配置 DeepSeek API 密钥到 .env 文件")
+            return
+
+        # 加载提示词文件
+        prompt_file = Path(__file__).parent / "播客提示词.txt"
+        if not prompt_file.exists():
+            self.log(f"错误: 找不到提示词文件: {prompt_file}")
+            return
+
+        try:
+            with open(prompt_file, 'r', encoding='utf-8') as f:
+                prompt_template = f.read()
+        except Exception as e:
+            self.log(f"错误: 读取提示词文件失败: {e}")
+            return
+
+        self.log(f"\n{'='*50}")
+        self.log("生成播客脚本...")
+        self.log(f"{'='*50}\n")
+        self.log(f"已加载提示词模板: {prompt_file}")
+
+        # 禁用按钮
+        self.podcast_button.config(state=tk.DISABLED)
+        self.open_text_button.config(state=tk.DISABLED)
+        self.format_button.config(state=tk.DISABLED)
+        self.minutes_button.config(state=tk.DISABLED)
+
+        # 在新线程中调用 API
+        thread = threading.Thread(target=self._call_deepseek_for_podcast, args=(prompt_template,))
+        thread.daemon = True
+        thread.start()
+
+    def _call_deepseek_for_podcast(self, prompt_template):
+        try:
+            api_key = os.getenv('DEEPSEEK_API_KEY')
+            api_url = os.getenv('DEEPSEEK_API_URL', 'https://api.deepseek.com/v1')
+            # 固定使用 deepseek-reasoner 模型
+            model = 'deepseek-reasoner'
+
+            self.log("正在连接 DeepSeek API...")
+
+            client = OpenAI(
+                api_key=api_key,
+                base_url=api_url
+            )
+
+            # 使用成文后的内容，如果没有则使用原始内容
+            content = getattr(self, 'formatted_text_content', self.current_text_content)
+            content_length = len(content)
+
+            self.log(f"文本长度: {content_length} 字符")
+
+            # 16K tokens 约等于 12K 汉字（1 token ≈ 0.75 汉字）
+            # 预留提示词空间，设置阈值为 10000 字符
+            MAX_CHARS_PER_CHUNK = 10000
+
+            if content_length <= MAX_CHARS_PER_CHUNK:
+                # 文本较短，直接处理
+                self.log("文本较短，直接生成播客脚本...")
+                podcast_text = self._process_podcast_chunk(client, model, prompt_template, content, 1, 1)
+            else:
+                # 按段落分割处理
+                self.log(f"文本较长({content_length}字符)，分段处理...")
+                chunks = self._split_text_by_paragraphs(content, MAX_CHARS_PER_CHUNK)
+                total_chunks = len(chunks)
+                self.log(f"分成 {total_chunks} 段处理...")
+
+                podcast_parts = []
+                for i, chunk in enumerate(chunks, 1):
+                    self.log(f"\n处理第 {i}/{total_chunks} 段...")
+                    part = self._process_podcast_chunk(client, model, prompt_template, chunk, i, total_chunks)
+                    podcast_parts.append(part)
+                    if i < total_chunks:
+                        self.log(f"  等待 1 秒避免请求过快...")
+                        time.sleep(1)
+
+                # 拼接所有部分
+                self.log(f"\n拼接 {total_chunks} 段结果...")
+                podcast_text = '\n\n'.join(podcast_parts)
+
+            self.log(f"✓ 播客脚本生成完成，总长度: {len(podcast_text)} 字符")
+
+            # 保存播客脚本
+            self._save_podcast(podcast_text)
+
+            # 更新状态
+            self.root.after(0, lambda: self.open_text_button.config(state=tk.NORMAL))
+            self.root.after(0, lambda: self.format_button.config(state=tk.NORMAL))
+            self.root.after(0, lambda: self.minutes_button.config(state=tk.NORMAL))
+
+        except Exception as e:
+            self.log(f"生成播客失败: {e}")
+            import traceback
+            self.log(f"错误详情: {traceback.format_exc()}")
+            self.log(f"错误: 生成播客失败: {e}")
+            self.root.after(0, lambda: self.open_text_button.config(state=tk.NORMAL))
+            self.root.after(0, lambda: self.format_button.config(state=tk.NORMAL))
+            self.root.after(0, lambda: self.minutes_button.config(state=tk.NORMAL))
+
+    def _split_text_by_paragraphs(self, text, max_chars):
+        """按段落分割文本，确保每段不超过最大字符数"""
+        paragraphs = text.split('\n\n')
+        chunks = []
+        current_chunk = ""
+
+        for para in paragraphs:
+            # 如果当前段落本身超过限制，需要进一步分割
+            if len(para) > max_chars:
+                # 先保存当前积累的块
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                    current_chunk = ""
+
+                # 按句子分割长段落
+                sentences = para.replace('。', '。\n').replace('！', '！\n').replace('？', '？\n').split('\n')
+                temp_chunk = ""
+
+                for sent in sentences:
+                    if len(temp_chunk) + len(sent) > max_chars:
+                        if temp_chunk:
+                            chunks.append(temp_chunk.strip())
+                        temp_chunk = sent
+                    else:
+                        temp_chunk += sent
+
+                if temp_chunk:
+                    if current_chunk:
+                        current_chunk += "\n\n" + temp_chunk
+                    else:
+                        current_chunk = temp_chunk
+            else:
+                # 检查加入当前段落后是否超过限制
+                if len(current_chunk) + len(para) + 2 > max_chars:
+                    if current_chunk:
+                        chunks.append(current_chunk.strip())
+                    current_chunk = para
+                else:
+                    if current_chunk:
+                        current_chunk += "\n\n" + para
+                    else:
+                        current_chunk = para
+
+        # 添加最后一块
+        if current_chunk:
+            chunks.append(current_chunk.strip())
+
+        return chunks
+
+    def _process_podcast_chunk(self, client, model, prompt_template, content, chunk_index, total_chunks):
+        """处理单个段落生成播客脚本"""
+        full_prompt = prompt_template + content
+
+        self.log(f"  发送请求 (长度: {len(full_prompt)} 字符)...")
+
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "你是一位资深的播客内容策划和编辑专家，擅长将会议或访谈内容转化为精彩的播客节目。"},
+                    {"role": "user", "content": full_prompt}
+                ],
+                temperature=0.8,
+                max_tokens=16000,
+                timeout=180
+            )
+
+            podcast_text = response.choices[0].message.content
+
+            if not podcast_text or len(podcast_text.strip()) == 0:
+                self.log("  警告: API 返回内容为空")
+                if hasattr(response.choices[0].message, 'reasoning_content'):
+                    podcast_text = response.choices[0].message.reasoning_content
+
+            self.log(f"  ✓ 第 {chunk_index}/{total_chunks} 段完成，返回长度: {len(podcast_text)} 字符")
+            return podcast_text
+
+        except Exception as e:
+            self.log(f"  ✗ 第 {chunk_index}/{total_chunks} 段调用失败: {e}")
+            raise
+
+    def _save_podcast(self, podcast_text):
+        """保存播客脚本到文本文件"""
+        try:
+            # 生成输出文件名：源文件名字_播客.txt
+            input_path = Path(self.current_text_path)
+            output_path = input_path.parent / f"{input_path.stem}_播客.txt"
+
+            # 直接覆盖保存
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(podcast_text)
+
+            self.log(f"\n✓ 播客脚本已保存到: {output_path}")
+
+        except Exception as e:
+            self.log(f"保存播客脚本失败: {e}")
+            raise
+
     def _generate_chunk_summary(self, client, model, chunk, chunk_index):
         """生成段落结构摘要"""
         summary_prompt = """请总结本段会议内容，按以下格式输出：
@@ -1040,32 +1249,30 @@ class MeetingMinutesApp:
             
     def start_transcription(self):
         if not self.current_audio_path:
-            messagebox.showwarning("警告", "请先选择音频文件")
+            self.log("警告: 请先选择音频文件")
             return
-            
+
         if self.transcribing:
             return
-            
+
         self.transcribing = True
         self.stop_button.config(state=tk.NORMAL)
         self.start_button.config(state=tk.DISABLED)
         self.open_button.config(state=tk.DISABLED)
         self.start_time = time.time()
-        
+
         self.log(f"\n{'='*50}")
         self.log(f"开始处理音频: {self.current_audio_path}")
         self.log(f"模型路径: {self.model_path}")
         self.log(f"{'='*50}\n")
-        
+
         if not os.path.exists(self.model_path):
             self.log(f"错误: 模型路径不存在: {self.model_path}")
-            messagebox.showerror("错误", f"模型路径不存在: {self.model_path}")
             self.reset_ui()
             return
-        
+
         if not os.path.exists(self.current_audio_path):
             self.log(f"错误: 音频文件不存在: {self.current_audio_path}")
-            messagebox.showerror("错误", f"音频文件不存在: {self.current_audio_path}")
             self.reset_ui()
             return
         
@@ -1074,8 +1281,7 @@ class MeetingMinutesApp:
         # 分割音频文件（带进度显示）
         self.segments = split_audio_with_progress(self.current_audio_path, log_callback=self.log)
         if self.segments is None:
-            self.log("错误: 无法分割音频文件")
-            messagebox.showerror("错误", "无法分割音频文件，请检查文件格式")
+            self.log("错误: 无法分割音频文件，请检查文件格式")
             self.reset_ui()
             return
         
@@ -1114,12 +1320,11 @@ class MeetingMinutesApp:
                         status = result_data[0]
                         data = result_data[1]
                         segment_idx = result_data[2] if len(result_data) > 2 else None
-                        
+
                         if status == "success":
                             self.process_result(data)
                         elif status == "error":
                             self.log(f"\n处理失败: {data}")
-                            messagebox.showerror("错误", f"处理失败: {data}")
                             self.reset_ui()
                             return
                 
@@ -1416,11 +1621,9 @@ class MeetingMinutesApp:
         
     def on_closing(self):
         if self.transcribing:
-            if messagebox.askokcancel("退出", "正在处理中，确定要退出吗？"):
-                self.stop_transcription()
-                self.root.destroy()
-        else:
-            self.root.destroy()
+            self.log("正在处理中，停止处理并退出...")
+            self.stop_transcription()
+        self.root.destroy()
 
 def main():
     root = tk.Tk()
