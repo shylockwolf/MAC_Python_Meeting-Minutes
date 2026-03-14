@@ -122,7 +122,7 @@ class MeetingMinutesApp:
         
         self.transcribing = False
         self.current_audio_path = None
-        self.model_path = "/Users/noone/Movies/myMLX/whisper-small-mlx"
+        self.model_path = "../../myMLX/whisper-small-mlx"
         self.transcribe_process = None
         self.log_queue = None
         self.result_queue = None

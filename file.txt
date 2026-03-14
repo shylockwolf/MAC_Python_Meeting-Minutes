@@ -7,7 +7,7 @@
 
 
 
-我的模型采用 whisper-small-mlx，安装目录 /Users/noone/Movies/myMLX/whisper-small-mlx
+我的模型采用 whisper-small-mlx，安装目录 ../../myMLX/whisper-small-mlx
 输出文件和输入文件同名 同目录  txt结尾
 
 
@@ -25,7 +25,7 @@ import mlx_whisper
 # 使用绝对路径指定模型位置
 result = mlx_whisper.transcribe(
     "audio.mp3",
-    path_or_hf_repo="/Users/noone/Movies/myMLX/whisper-small-mlx",
+    path_or_hf_repo="../../myMLX/whisper-small-mlx",
     language="zh"
 )
 
