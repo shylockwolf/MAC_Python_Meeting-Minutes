@@ -12,6 +12,8 @@ import mlx_whisper
 from pathlib import Path
 from dotenv import load_dotenv
 from openai import OpenAI
+import markdown
+import re
 
 # 加载环境变量
 load_dotenv()
@@ -1245,9 +1247,354 @@ class MeetingMinutesApp:
             if output_path != original_output_path:
                 self.log(f"  (原文件已存在，使用新文件名)")
             
+            # 自动生成 PDF 文件
+            self._convert_md_to_pdf(output_path, minutes_text)
+            
         except Exception as e:
             self.log(f"保存会议纪要失败: {e}")
             raise
+    
+    def _convert_md_to_pdf(self, md_path, markdown_text):
+        """将 Markdown 文件转换为 PDF"""
+        try:
+            pdf_path = md_path.with_suffix('.pdf')
+            
+            self.log(f"\n正在生成 PDF 文件...")
+            
+            # 转换为 HTML
+            html_content = markdown.markdown(
+                markdown_text,
+                extensions=['tables', 'fenced_code', 'nl2br', 'toc']
+            )
+            
+            # 创建带样式的 HTML
+            html_template = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+            font-size: 12pt;
+            line-height: 1.6;
+            color: #333;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 40px 20px;
+        }}
+        
+        h1 {{
+            font-size: 24pt;
+            color: #2c3e50;
+            border-bottom: 3px solid #3498db;
+            padding-bottom: 10px;
+            margin-top: 30px;
+            margin-bottom: 20px;
+        }}
+        
+        h2 {{
+            font-size: 20pt;
+            color: #34495e;
+            border-bottom: 2px solid #95a5a6;
+            padding-bottom: 8px;
+            margin-top: 25px;
+            margin-bottom: 15px;
+        }}
+        
+        h3 {{
+            font-size: 16pt;
+            color: #2c3e50;
+            margin-top: 20px;
+            margin-bottom: 10px;
+        }}
+        
+        h4 {{
+            font-size: 14pt;
+            color: #34495e;
+            margin-top: 15px;
+            margin-bottom: 10px;
+        }}
+        
+        p {{
+            margin: 10px 0;
+            text-align: justify;
+        }}
+        
+        ul, ol {{
+            margin: 10px 0;
+            padding-left: 30px;
+        }}
+        
+        li {{
+            margin: 5px 0;
+        }}
+        
+        strong {{
+            color: #2c3e50;
+            font-weight: 600;
+        }}
+        
+        em {{
+            color: #7f8c8d;
+            font-style: italic;
+        }}
+        
+        code {{
+            background-color: #f4f4f4;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: "Courier New", monospace;
+            font-size: 10pt;
+        }}
+        
+        pre {{
+            background-color: #f8f8f8;
+            border-left: 4px solid #3498db;
+            padding: 12px;
+            overflow-x: auto;
+            margin: 15px 0;
+        }}
+        
+        pre code {{
+            background-color: transparent;
+            padding: 0;
+        }}
+        
+        blockquote {{
+            border-left: 4px solid #95a5a6;
+            margin: 15px 0;
+            padding-left: 15px;
+            color: #7f8c8d;
+        }}
+        
+        table {{
+            border-collapse: collapse;
+            width: 100%;
+            margin: 15px 0;
+        }}
+        
+        th, td {{
+            border: 1px solid #bdc3c7;
+            padding: 8px 12px;
+            text-align: left;
+        }}
+        
+        th {{
+            background-color: #3498db;
+            color: white;
+            font-weight: bold;
+        }}
+        
+        tr:nth-child(even) {{
+            background-color: #f8f9fa;
+        }}
+        
+        a {{
+            color: #3498db;
+            text-decoration: none;
+        }}
+        
+        hr {{
+            border: none;
+            border-top: 2px solid #ecf0f1;
+            margin: 25px 0;
+        }}
+        
+        @media print {{
+            body {{
+                padding: 0;
+            }}
+            
+            h1, h2, h3 {{
+                page-break-after: avoid;
+            }}
+            
+            pre, blockquote {{
+                page-break-inside: avoid;
+            }}
+        }}
+    </style>
+</head>
+<body>
+    {html_content}
+</body>
+</html>
+"""
+            
+            # 创建临时 HTML 文件
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as tmp_html:
+                tmp_html.write(html_template)
+                tmp_html_path = tmp_html.name
+            
+            try:
+                # 方法 1: 使用 cupsfilter (macOS 系统自带)
+                try:
+                    result = subprocess.run(
+                        ['cupsfilter', '-m', 'application/pdf', '-o', f'output={pdf_path}', tmp_html_path],
+                        capture_output=True,
+                        text=True,
+                        timeout=30
+                    )
+                    
+                    if result.returncode == 0 and pdf_path.exists():
+                        self.log(f"✓ PDF 文件已生成: {pdf_path}")
+                        return
+                except Exception as e:
+                    pass
+                
+                # 方法 2: 使用 textutil (macOS 系统自带)
+                try:
+                    rtf_path = Path(tmp_html_path).with_suffix('.rtf')
+                    result = subprocess.run(
+                        ['textutil', '-convert', 'rtf', '-output', str(rtf_path), tmp_html_path],
+                        capture_output=True,
+                        text=True,
+                        timeout=30
+                    )
+                    
+                    if result.returncode == 0 and rtf_path.exists():
+                        result = subprocess.run(
+                            ['textutil', '-convert', 'pdf', '-output', str(pdf_path), str(rtf_path)],
+                            capture_output=True,
+                            text=True,
+                            timeout=30
+                        )
+                        
+                        if result.returncode == 0 and pdf_path.exists():
+                            self.log(f"✓ PDF 文件已生成: {pdf_path}")
+                            if rtf_path.exists():
+                                rtf_path.unlink()
+                            return
+                except Exception as e:
+                    pass
+                
+                # 方法 3: 使用 reportlab (Python 库)
+                try:
+                    from reportlab.lib.pagesizes import A4
+                    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+                    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+                    from reportlab.lib.units import cm
+                    from reportlab.pdfbase import pdfmetrics
+                    from reportlab.pdfbase.ttfonts import TTFont
+                    
+                    # 创建 PDF 文档
+                    doc = SimpleDocTemplate(
+                        str(pdf_path),
+                        pagesize=A4,
+                        leftMargin=2*cm,
+                        rightMargin=2*cm,
+                        topMargin=2*cm,
+                        bottomMargin=2*cm
+                    )
+                    
+                    # 注册中文字体
+                    font_paths = [
+                        '/System/Library/Fonts/PingFang.ttc',
+                        '/System/Library/Fonts/STHeiti Light.ttc',
+                        '/System/Library/Fonts/Hiragino Sans GB.ttc',
+                    ]
+                    
+                    font_name = 'Helvetica'
+                    for font_path in font_paths:
+                        if os.path.exists(font_path):
+                            try:
+                                pdfmetrics.registerFont(TTFont('ChineseFont', font_path))
+                                font_name = 'ChineseFont'
+                                break
+                            except:
+                                pass
+                    
+                    # 创建样式
+                    styles = getSampleStyleSheet()
+                    
+                    # 自定义样式
+                    title_style = ParagraphStyle(
+                        'CustomTitle',
+                        parent=styles['Heading1'],
+                        fontName=font_name,
+                        fontSize=18,
+                        spaceAfter=30,
+                    )
+                    
+                    heading_style = ParagraphStyle(
+                        'CustomHeading',
+                        parent=styles['Heading2'],
+                        fontName=font_name,
+                        fontSize=14,
+                        spaceAfter=12,
+                    )
+                    
+                    normal_style = ParagraphStyle(
+                        'CustomNormal',
+                        parent=styles['Normal'],
+                        fontName=font_name,
+                        fontSize=10,
+                        leading=14,
+                    )
+                    
+                    # 构建内容
+                    story = []
+                    lines = markdown_text.split('\n')
+                    
+                    for line in lines:
+                        line = line.strip()
+                        if not line:
+                            story.append(Spacer(1, 0.3*cm))
+                            continue
+                        
+                        # 处理标题
+                        if line.startswith('# '):
+                            text = self._clean_md_formatting(line[2:])
+                            story.append(Paragraph(text, title_style))
+                        elif line.startswith('## '):
+                            text = self._clean_md_formatting(line[3:])
+                            story.append(Paragraph(text, heading_style))
+                        else:
+                            text = self._clean_md_formatting(line)
+                            try:
+                                story.append(Paragraph(text, normal_style))
+                            except:
+                                pass
+                    
+                    # 生成 PDF
+                    doc.build(story)
+                    
+                    if pdf_path.exists():
+                        self.log(f"✓ PDF 文件已生成: {pdf_path}")
+                        return
+                        
+                except ImportError:
+                    pass
+                except Exception as e:
+                    pass
+                
+                # 如果所有方法都失败
+                self.log(f"⚠ PDF 生成失败 (Markdown 文件已保存)")
+                self.log(f"  提示: 可手动打开 Markdown 文件并打印为 PDF")
+                
+            finally:
+                # 清理临时文件
+                try:
+                    if os.path.exists(tmp_html_path):
+                        os.unlink(tmp_html_path)
+                except:
+                    pass
+            
+        except Exception as e:
+            self.log(f"⚠ PDF 生成失败: {e}")
+            self.log(f"  (Markdown 文件已成功保存)")
+    
+    def _clean_md_formatting(self, text):
+        """清理 Markdown 格式标记"""
+        # 移除粗体、斜体等格式
+        text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+        text = re.sub(r'\*(.+?)\*', r'\1', text)
+        text = re.sub(r'`(.+?)`', r'\1', text)
+        # 转义特殊字符
+        text = text.replace('&', '&amp;')
+        text = text.replace('<', '&lt;')
+        text = text.replace('>', '&gt;')
+        return text
             
     def start_transcription(self):
         if not self.current_audio_path:
