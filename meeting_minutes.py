@@ -351,11 +351,12 @@ class MeetingMinutesApp:
     def _process_formatting_chunk(self, client, model, chunk, chunk_index, total_chunks):
         """处理单个文本块（成文）"""
         prompt = """以下是音频转文字的原始文件，请做一下处理：
-1、保留时间戳，格式必须统一为 [MM:SS-MM:SS]，如 [15:09-16:34]
-2、每个时间戳前面加4个空格，时间戳与文本之间不加粗、直接连接，如：    [15:09-16:34] 他说就是我现在找的 Sales Leads
-3、按语义拼接成合理的句子和段落，并增加标点符号
-4、按简体中文输出
-5、保持段落结构清晰
+1、将连续相关的句子合并成段落，不要把每句话单独成行
+2、每个段落保留一个时间戳，格式为 [MM:SS-MM:SS]，表示该段落的开始和结束时间，如 [15:09-16:34]
+3、每个段落的时间戳前面加4个空格，时间戳与段落文本之间空一格，如：    [15:09-16:34] 这是合并后的段落内容...
+4、语义完整的几句话合并为一个段落，段落之间用空行分隔
+5、按简体中文输出，增加适当的标点符号
+6、保持内容结构清晰，同一主题的内容放在同一个段落中
 
 原始文本：
 """
@@ -669,11 +670,12 @@ class MeetingMinutesApp:
     def _process_text_chunk(self, client, model, chunk, chunk_index, total_chunks):
         """处理单个文本块"""
         prompt = """以下是音频转文字的原始文件，请做一下处理：
-1、保留时间戳，格式必须统一为 [MM:SS-MM:SS]，如 [15:09-16:34]
-2、每个时间戳前面加4个空格，时间戳与文本之间不加粗、直接连接，如：    [15:09-16:34] 他说就是我现在找的 Sales Leads
-3、按语义拼接成合理的句子和段落，并增加标点符号
-4、按简体中文输出
-5、保持段落结构清晰
+1、将连续相关的句子合并成段落，不要把每句话单独成行
+2、每个段落保留一个时间戳，格式为 [MM:SS-MM:SS]，表示该段落的开始和结束时间，如 [15:09-16:34]
+3、每个段落的时间戳前面加4个空格，时间戳与段落文本之间空一格，如：    [15:09-16:34] 这是合并后的段落内容...
+4、语义完整的几句话合并为一个段落，段落之间用空行分隔
+5、按简体中文输出，增加适当的标点符号
+6、保持内容结构清晰，同一主题的内容放在同一个段落中
 
 原始文本：
 """
@@ -1260,12 +1262,267 @@ class MeetingMinutesApp:
             pdf_path = md_path.with_suffix('.pdf')
             
             self.log(f"\n正在生成 PDF 文件...")
+            self.log(f"目标文件: {pdf_path.name}")
             
-            # 转换为 HTML
-            html_content = markdown.markdown(
-                markdown_text,
-                extensions=['tables', 'fenced_code', 'nl2br', 'toc']
-            )
+            # 方法 1: 使用 reportlab (最可靠)
+            self.log("尝试方法 1: reportlab...")
+            try:
+                from reportlab.lib.pagesizes import A4
+                from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+                from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+                from reportlab.lib.units import cm
+                from reportlab.pdfbase import pdfmetrics
+                from reportlab.pdfbase.ttfonts import TTFont
+                from reportlab.lib.enums import TA_LEFT, TA_JUSTIFY
+                
+                # 创建 PDF 文档
+                doc = SimpleDocTemplate(
+                    str(pdf_path),
+                    pagesize=A4,
+                    leftMargin=2*cm,
+                    rightMargin=2*cm,
+                    topMargin=2*cm,
+                    bottomMargin=2*cm
+                )
+                
+                # 注册中文字体
+                font_paths = [
+                    '/System/Library/Fonts/PingFang.ttc',
+                    '/System/Library/Fonts/STHeiti Light.ttc',
+                    '/System/Library/Fonts/Hiragino Sans GB.ttc',
+                ]
+                
+                font_name = 'Helvetica'
+                font_found = False
+                for font_path in font_paths:
+                    if os.path.exists(font_path):
+                        try:
+                            pdfmetrics.registerFont(TTFont('ChineseFont', font_path))
+                            font_name = 'ChineseFont'
+                            font_found = True
+                            self.log(f"  使用字体: {Path(font_path).name}")
+                            break
+                        except Exception as e:
+                            self.log(f"  字体注册失败 {font_path}: {e}")
+                
+                if not font_found:
+                    self.log("  警告: 未找到中文字体，使用默认字体")
+                
+                # 创建样式
+                styles = getSampleStyleSheet()
+                
+                # 自定义样式
+                title_style = ParagraphStyle(
+                    'CustomTitle',
+                    parent=styles['Heading1'],
+                    fontName=font_name,
+                    fontSize=18,
+                    spaceAfter=30,
+                    textColor='#2c3e50',
+                )
+                
+                heading2_style = ParagraphStyle(
+                    'CustomHeading2',
+                    parent=styles['Heading2'],
+                    fontName=font_name,
+                    fontSize=16,
+                    spaceAfter=20,
+                    textColor='#34495e',
+                )
+                
+                heading3_style = ParagraphStyle(
+                    'CustomHeading3',
+                    parent=styles['Heading3'],
+                    fontName=font_name,
+                    fontSize=14,
+                    spaceAfter=15,
+                    textColor='#2c3e50',
+                )
+                
+                heading4_style = ParagraphStyle(
+                    'CustomHeading4',
+                    parent=styles['Heading4'],
+                    fontName=font_name,
+                    fontSize=12,
+                    spaceAfter=10,
+                    textColor='#34495e',
+                )
+                
+                normal_style = ParagraphStyle(
+                    'CustomNormal',
+                    parent=styles['Normal'],
+                    fontName=font_name,
+                    fontSize=10,
+                    leading=14,
+                    alignment=TA_JUSTIFY,
+                )
+                
+                bullet_style = ParagraphStyle(
+                    'CustomBullet',
+                    parent=styles['Normal'],
+                    fontName=font_name,
+                    fontSize=10,
+                    leading=14,
+                    leftIndent=20,
+                )
+                
+                # 构建内容
+                story = []
+                lines = markdown_text.split('\n')
+                
+                for line in lines:
+                    original_line = line
+                    line = line.strip()
+                    
+                    if not line:
+                        story.append(Spacer(1, 0.3*cm))
+                        continue
+                    
+                    try:
+                        # 处理标题
+                        if line.startswith('# '):
+                            text = self._clean_md_formatting(line[2:])
+                            story.append(Paragraph(text, title_style))
+                            story.append(Spacer(1, 0.5*cm))
+                        elif line.startswith('## '):
+                            text = self._clean_md_formatting(line[3:])
+                            story.append(Paragraph(text, heading2_style))
+                            story.append(Spacer(1, 0.3*cm))
+                        elif line.startswith('### '):
+                            text = self._clean_md_formatting(line[4:])
+                            story.append(Paragraph(text, heading3_style))
+                            story.append(Spacer(1, 0.2*cm))
+                        elif line.startswith('#### '):
+                            text = self._clean_md_formatting(line[5:])
+                            story.append(Paragraph(text, heading4_style))
+                            story.append(Spacer(1, 0.2*cm))
+                        elif line.startswith('- ') or line.startswith('* '):
+                            # 列表项
+                            text = "• " + self._clean_md_formatting(line[2:])
+                            story.append(Paragraph(text, bullet_style))
+                        elif line.startswith('---'):
+                            # 分隔线（简化处理）
+                            story.append(Spacer(1, 0.5*cm))
+                        else:
+                            # 普通文本
+                            text = self._clean_md_formatting(line)
+                            story.append(Paragraph(text, normal_style))
+                    except Exception as e:
+                        # 如果某行处理失败，跳过并继续
+                        self.log(f"  警告: 处理行失败: {original_line[:50]}...")
+                        continue
+                
+                # 生成 PDF
+                doc.build(story)
+                
+                if pdf_path.exists():
+                    self.log(f"✓ PDF 生成成功: {pdf_path}")
+                    self.log(f"  文件大小: {pdf_path.stat().st_size} 字节")
+                    return
+                else:
+                    self.log(f"✗ PDF 文件未生成")
+                    
+            except ImportError as e:
+                self.log(f"✗ reportlab 未安装: {e}")
+                self.log(f"  安装命令: pip install reportlab")
+            except Exception as e:
+                self.log(f"✗ reportlab 失败: {e}")
+                import traceback
+                self.log(f"  详细错误: {traceback.format_exc()}")
+            
+            # 方法 2: 使用 cupsfilter (备用)
+            self.log("尝试方法 2: cupsfilter...")
+            try:
+                import tempfile
+                
+                # 转换为 HTML
+                html_content = markdown.markdown(
+                    markdown_text,
+                    extensions=['tables', 'fenced_code', 'nl2br']
+                )
+                
+                # 创建临时 HTML 文件
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as tmp_html:
+                    tmp_html.write(f"<html><body>{html_content}</body></html>")
+                    tmp_html_path = tmp_html.name
+                
+                try:
+                    result = subprocess.run(
+                        ['cupsfilter', '-m', 'application/pdf', '-o', f'output={pdf_path}', tmp_html_path],
+                        capture_output=True,
+                        text=True,
+                        timeout=30
+                    )
+                    
+                    if result.returncode == 0 and pdf_path.exists():
+                        self.log(f"✓ PDF 生成成功 (cupsfilter): {pdf_path}")
+                        return
+                    else:
+                        self.log(f"✗ cupsfilter 失败: {result.stderr[:100]}")
+                finally:
+                    if os.path.exists(tmp_html_path):
+                        os.unlink(tmp_html_path)
+                        
+            except Exception as e:
+                self.log(f"✗ cupsfilter 失败: {e}")
+            
+            # 方法 3: 使用 textutil (备用)
+            self.log("尝试方法 3: textutil...")
+            try:
+                import tempfile
+                
+                # 创建临时 HTML 文件
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as tmp_html:
+                    html_content = markdown.markdown(markdown_text, extensions=['tables', 'fenced_code', 'nl2br'])
+                    tmp_html.write(f"<html><body>{html_content}</body></html>")
+                    tmp_html_path = tmp_html.name
+                
+                try:
+                    rtf_path = Path(tmp_html_path).with_suffix('.rtf')
+                    
+                    # HTML -> RTF
+                    result = subprocess.run(
+                        ['textutil', '-convert', 'rtf', '-output', str(rtf_path), tmp_html_path],
+                        capture_output=True,
+                        text=True,
+                        timeout=30
+                    )
+                    
+                    if result.returncode == 0 and rtf_path.exists():
+                        # RTF -> PDF
+                        result = subprocess.run(
+                            ['textutil', '-convert', 'pdf', '-output', str(pdf_path), str(rtf_path)],
+                            capture_output=True,
+                            text=True,
+                            timeout=30
+                        )
+                        
+                        if result.returncode == 0 and pdf_path.exists():
+                            self.log(f"✓ PDF 生成成功 (textutil): {pdf_path}")
+                            if rtf_path.exists():
+                                rtf_path.unlink()
+                            return
+                        else:
+                            self.log(f"✗ RTF 转 PDF 失败: {result.stderr[:100]}")
+                    else:
+                        self.log(f"✗ HTML 转 RTF 失败: {result.stderr[:100]}")
+                finally:
+                    if os.path.exists(tmp_html_path):
+                        os.unlink(tmp_html_path)
+                        
+            except Exception as e:
+                self.log(f"✗ textutil 失败: {e}")
+            
+            # 所有方法都失败
+            self.log(f"\n✗ PDF 生成失败 (所有方法均不可用)")
+            self.log(f"  Markdown 文件已保存: {md_path}")
+            self.log(f"  建议: 手动打开 Markdown 文件并打印为 PDF")
+            
+        except Exception as e:
+            self.log(f"✗ PDF 生成过程出错: {e}")
+            import traceback
+            self.log(f"详细错误: {traceback.format_exc()}")
+            self.log(f"  Markdown 文件已成功保存")
             
             # 创建带样式的 HTML
             html_template = f"""<!DOCTYPE html>
@@ -1439,8 +1696,10 @@ class MeetingMinutesApp:
                     if result.returncode == 0 and pdf_path.exists():
                         self.log(f"✓ PDF 文件已生成: {pdf_path}")
                         return
+                    else:
+                        self.log(f"  cupsfilter 失败: {result.stderr[:200] if result.stderr else 'unknown error'}")
                 except Exception as e:
-                    pass
+                    self.log(f"  cupsfilter 异常: {e}")
                 
                 # 方法 2: 使用 textutil (macOS 系统自带)
                 try:
@@ -1465,8 +1724,12 @@ class MeetingMinutesApp:
                             if rtf_path.exists():
                                 rtf_path.unlink()
                             return
+                        else:
+                            self.log(f"  textutil 转PDF失败: {result.stderr[:200] if result.stderr else 'unknown error'}")
+                    else:
+                        self.log(f"  textutil 转RTF失败: {result.stderr[:200] if result.stderr else 'unknown error'}")
                 except Exception as e:
-                    pass
+                    self.log(f"  textutil 异常: {e}")
                 
                 # 方法 3: 使用 reportlab (Python 库)
                 try:
@@ -1489,20 +1752,27 @@ class MeetingMinutesApp:
                     
                     # 注册中文字体
                     font_paths = [
-                        '/System/Library/Fonts/PingFang.ttc',
-                        '/System/Library/Fonts/STHeiti Light.ttc',
                         '/System/Library/Fonts/Hiragino Sans GB.ttc',
+                        '/System/Library/Fonts/STHeiti Light.ttc',
+                        '/System/Library/Fonts/ArialHB.ttc',
                     ]
                     
                     font_name = 'Helvetica'
+                    font_registered = False
                     for font_path in font_paths:
                         if os.path.exists(font_path):
                             try:
                                 pdfmetrics.registerFont(TTFont('ChineseFont', font_path))
                                 font_name = 'ChineseFont'
+                                font_registered = True
+                                self.log(f"  已注册字体: {font_path}")
                                 break
-                            except:
-                                pass
+                            except Exception as font_e:
+                                self.log(f"  字体注册失败 {font_path}: {font_e}")
+                                continue
+                    
+                    if not font_registered:
+                        self.log("  警告: 未找到合适的中文字体，PDF可能显示异常")
                     
                     # 创建样式
                     styles = getSampleStyleSheet()
@@ -1553,7 +1823,8 @@ class MeetingMinutesApp:
                             text = self._clean_md_formatting(line)
                             try:
                                 story.append(Paragraph(text, normal_style))
-                            except:
+                            except Exception as para_e:
+                                self.log(f"  段落渲染跳过: {para_e}")
                                 pass
                     
                     # 生成 PDF
@@ -1562,11 +1833,13 @@ class MeetingMinutesApp:
                     if pdf_path.exists():
                         self.log(f"✓ PDF 文件已生成: {pdf_path}")
                         return
+                    else:
+                        self.log("  reportlab 生成后文件不存在")
                         
-                except ImportError:
-                    pass
+                except ImportError as ie:
+                    self.log(f"  reportlab 未安装: {ie}")
                 except Exception as e:
-                    pass
+                    self.log(f"  reportlab 异常: {e}")
                 
                 # 如果所有方法都失败
                 self.log(f"⚠ PDF 生成失败 (Markdown 文件已保存)")
@@ -1834,18 +2107,17 @@ class MeetingMinutesApp:
             text = segment['text'].strip()
             self.log(f"[{i}] {start:.2f}s - {end:.2f}s: {text}")
         
-        # 保存转录结果（非一键模式下）
-        if not (hasattr(self, 'one_click_mode') and self.one_click_mode):
-            self.save_result(merged_text, all_segments)
+        # 保存转录结果，获取带时间戳格式的文本（一键模式下跳过文件保存）
+        is_one_click = hasattr(self, 'one_click_mode') and self.one_click_mode
+        transcription_with_timestamps = self.save_result(merged_text, all_segments, skip_save=is_one_click)
         
         processing_time = time.time() - self.start_time
         self.log(f"\n{'='*50}")
         self.log("转录完成！")
-        self.log(f"总处理时间: {processing_time:.2f} 秒")
         self.log(f"{'='*50}")
         
-        # 保存转录结果供一键模式使用
-        self.transcription_result = merged_text
+        # 保存转录结果供后续使用（带时间戳格式）
+        self.transcription_result = transcription_with_timestamps if transcription_with_timestamps else merged_text
         
         self.cleanup_temp_files()
         self.reset_ui()
@@ -1874,60 +2146,73 @@ class MeetingMinutesApp:
         self.segments = []
         self.all_results = []
         
-    def save_result(self, text, segments=None):
+    def save_result(self, text, segments=None, skip_save=False):
         if not self.current_audio_path:
             self.log("错误: 没有当前音频文件路径")
-            return
+            return None
             
         try:
             audio_path = Path(self.current_audio_path)
             output_path = audio_path.with_suffix('.txt')
             
-            self.log(f"\n正在保存结果到: {output_path}")
-            self.log(f"音频路径: {audio_path}")
-            self.log(f"segments数量: {len(segments) if segments else 0}")
-            
-            with open(output_path, 'w', encoding='utf-8') as f:
-                if segments:
-                    # 带时间戳格式
-                    f.write(f"会议纪要文本\n")
-                    f.write(f"{'='*50}\n")
-                    f.write(f"原始文件: {audio_path.name}\n")
-                    f.write(f"总片段数: {len(segments)}\n")
-                    f.write(f"{'='*50}\n\n")
-                    
-                    for i, segment in enumerate(segments, 1):
-                        start = segment['start']
-                        end = segment['end']
-                        segment_text = segment['text'].strip()
-                        
-                        # 格式化时间为 MM:SS 格式
-                        start_min = int(start // 60)
-                        start_sec = int(start % 60)
-                        end_min = int(end // 60)
-                        end_sec = int(end % 60)
-                        
-                        # 时间戳和文本在一行显示
-                        f.write(f"[{start_min:02d}:{start_sec:02d}-{end_min:02d}:{end_sec:02d}] {segment_text}\n")
-                else:
-                    # 纯文本格式（如果没有segments）
-                    f.write(text)
+            # 生成带时间戳格式的文本内容
+            formatted_text = None
+            if segments:
+                lines = []
+                lines.append("会议纪要文本")
+                lines.append(f"{'='*50}")
+                lines.append(f"原始文件: {audio_path.name}")
+                lines.append(f"总片段数: {len(segments)}")
+                lines.append(f"{'='*50}")
+                lines.append("")
                 
-            # 验证文件是否成功创建
-            if output_path.exists():
-                file_size = output_path.stat().st_size
-                self.log(f"✓ 结果已成功保存到: {output_path}")
-                self.log(f"  文件大小: {file_size} 字节")
+                for i, segment in enumerate(segments, 1):
+                    start = segment['start']
+                    end = segment['end']
+                    segment_text = segment['text'].strip()
+                    
+                    # 格式化时间为 MM:SS 格式
+                    start_min = int(start // 60)
+                    start_sec = int(start % 60)
+                    end_min = int(end // 60)
+                    end_sec = int(end % 60)
+                    
+                    # 时间戳和文本在一行显示
+                    lines.append(f"[{start_min:02d}:{start_sec:02d}-{end_min:02d}:{end_sec:02d}] {segment_text}")
+                
+                formatted_text = '\n'.join(lines)
             else:
-                self.log(f"✗ 文件保存失败: {output_path} 不存在")
+                formatted_text = text
+            
+            # 如果不跳过保存，则写入文件
+            if not skip_save:
+                self.log(f"\n正在保存结果到: {output_path}")
+                self.log(f"音频路径: {audio_path}")
+                self.log(f"segments数量: {len(segments) if segments else 0}")
+                
+                with open(output_path, 'w', encoding='utf-8') as f:
+                    f.write(formatted_text)
+                
+                # 验证文件是否成功创建
+                if output_path.exists():
+                    file_size = output_path.stat().st_size
+                    self.log(f"✓ 结果已成功保存到: {output_path}")
+                    self.log(f"  文件大小: {file_size} 字节")
+                else:
+                    self.log(f"✗ 文件保存失败: {output_path} 不存在")
+            
+            # 返回带时间戳格式的文本内容
+            return formatted_text
                 
         except PermissionError as e:
             self.log(f"保存文件失败 (权限错误): {e}")
             self.log(f"请检查目录权限: {output_path.parent}")
+            return None
         except Exception as e:
             self.log(f"保存文件失败: {e}")
             import traceback
             self.log(f"详细错误: {traceback.format_exc()}")
+            return None
             
     def stop_transcription(self):
         if self.transcribing and self.transcribe_process:
