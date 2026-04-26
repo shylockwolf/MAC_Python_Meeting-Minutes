@@ -1,5 +1,5 @@
-openai
-python-dotenv
-mlx-whisper
-markdown
-reportlab
+openai>=1.0.0
+python-dotenv>=1.0.0
+mlx-whisper>=0.4.0
+markdown>=3.5.0
+reportlab>=4.0.0

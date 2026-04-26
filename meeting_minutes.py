@@ -293,7 +293,7 @@ class MeetingMinutesApp:
         try:
             api_key = os.getenv('DEEPSEEK_API_KEY')
             api_url = os.getenv('DEEPSEEK_API_URL', 'https://api.deepseek.com/v1')
-            model = os.getenv('DEEPSEEK_MODEL', 'deepseek-chat')
+            model = os.getenv('DEEPSEEK_MODEL', 'deepseek-v4-flash')
 
             self.log("正在连接 DeepSeek API...")
 
@@ -303,7 +303,7 @@ class MeetingMinutesApp:
             )
 
             # 估算每段最大字符数
-            MAX_CHARS_PER_CHUNK = 15000
+            MAX_CHARS_PER_CHUNK = 100000
 
             content = self.current_text_content
             content_length = len(content)
@@ -373,7 +373,7 @@ class MeetingMinutesApp:
                     {"role": "user", "content": full_prompt}
                 ],
                 temperature=0.7,
-                max_tokens=16000,
+                max_tokens=384000,
                 timeout=180
             )
 
@@ -390,16 +390,16 @@ class MeetingMinutesApp:
         except Exception as e:
             self.log(f"  ✗ 调用失败: {e}")
             # 尝试使用备用模型
-            if model != 'deepseek-chat':
-                self.log("  尝试使用 deepseek-chat 模型...")
+            if model != 'deepseek-v4-flash':
+                self.log("  尝试使用 deepseek-v4-flash 模型...")
                 response = client.chat.completions.create(
-                    model='deepseek-chat',
+                    model='deepseek-v4-flash',
                     messages=[
                         {"role": "system", "content": "你是一个专业的文本编辑助手，擅长整理和优化语音转文字的文本。"},
                         {"role": "user", "content": full_prompt}
                     ],
                     temperature=0.7,
-                    max_tokens=16000,
+                    max_tokens=384000,
                     timeout=180
                 )
                 formatted_text = response.choices[0].message.content
@@ -449,7 +449,7 @@ class MeetingMinutesApp:
         try:
             api_key = os.getenv('DEEPSEEK_API_KEY')
             api_url = os.getenv('DEEPSEEK_API_URL', 'https://api.deepseek.com/v1')
-            model = os.getenv('DEEPSEEK_MODEL', 'deepseek-chat')
+            model = os.getenv('DEEPSEEK_MODEL', 'deepseek-v4-flash')
 
             self.log("正在连接 DeepSeek API...")
 
@@ -465,7 +465,7 @@ class MeetingMinutesApp:
             self.log(f"文本长度: {content_length} 字符")
 
             # 64K tokens 约等于 48K 汉字
-            MAX_CHARS_THRESHOLD = 45000
+            MAX_CHARS_THRESHOLD = 100000
 
             # 如果文本较短，直接处理
             if content_length <= MAX_CHARS_THRESHOLD:
@@ -477,7 +477,7 @@ class MeetingMinutesApp:
                 self.log(f"文本较长({content_length}字符)，使用两阶段处理...")
 
                 # 第一阶段：分段生成结构摘要
-                chunk_size = 15000
+                chunk_size = 100000
                 chunks = self._split_text_into_chunks(content, chunk_size)
                 total_chunks = len(chunks)
 
@@ -586,7 +586,7 @@ class MeetingMinutesApp:
         try:
             api_key = os.getenv('DEEPSEEK_API_KEY')
             api_url = os.getenv('DEEPSEEK_API_URL', 'https://api.deepseek.com/v1')
-            model = os.getenv('DEEPSEEK_MODEL', 'deepseek-chat')
+            model = os.getenv('DEEPSEEK_MODEL', 'deepseek-v4-flash')
             
             self.log("正在连接 DeepSeek API...")
             
@@ -598,7 +598,7 @@ class MeetingMinutesApp:
             # 估算每段最大字符数（预留空间给提示词和输出）
             # DeepSeek 最大 32K tokens，约 24K 汉字
             # 预留 4K 给提示词和输出，每段约 20K 字符
-            MAX_CHARS_PER_CHUNK = 15000  # 保守估计，每段1.5万字符
+            MAX_CHARS_PER_CHUNK = 100000  # 每段10万字符
             
             content = self.current_text_content
             content_length = len(content)
@@ -692,7 +692,7 @@ class MeetingMinutesApp:
                     {"role": "user", "content": full_prompt}
                 ],
                 temperature=0.7,
-                max_tokens=16000,  # 增加到最大限制
+                max_tokens=384000,  # 增加到最大限制
                 timeout=180  # 增加到3分钟
             )
             
@@ -709,16 +709,16 @@ class MeetingMinutesApp:
         except Exception as e:
             self.log(f"  ✗ 调用失败: {e}")
             # 尝试使用备用模型
-            if model != 'deepseek-chat':
-                self.log("  尝试使用 deepseek-chat 模型...")
+            if model != 'deepseek-v4-flash':
+                self.log("  尝试使用 deepseek-v4-flash 模型...")
                 response = client.chat.completions.create(
-                    model='deepseek-chat',
+                    model='deepseek-v4-flash',
                     messages=[
                         {"role": "system", "content": "你是一个专业的文本编辑助手，擅长整理和优化语音转文字的文本。"},
                         {"role": "user", "content": full_prompt}
                     ],
                     temperature=0.7,
-                    max_tokens=16000,
+                    max_tokens=384000,
                     timeout=180
                 )
                 formatted_text = response.choices[0].message.content
@@ -789,7 +789,7 @@ class MeetingMinutesApp:
         try:
             api_key = os.getenv('DEEPSEEK_API_KEY')
             api_url = os.getenv('DEEPSEEK_API_URL', 'https://api.deepseek.com/v1')
-            model = os.getenv('DEEPSEEK_MODEL', 'deepseek-chat')
+            model = os.getenv('DEEPSEEK_MODEL', 'deepseek-v4-flash')
             
             self.log("正在连接 DeepSeek API...")
             
@@ -806,7 +806,7 @@ class MeetingMinutesApp:
             
             # 64K tokens 约等于 48K 汉字（1 token ≈ 0.75 汉字）
             # 预留空间给输出，设置阈值为 45000 字符
-            MAX_CHARS_THRESHOLD = 45000
+            MAX_CHARS_THRESHOLD = 100000
             
             # 如果文本较短，直接处理
             if content_length <= MAX_CHARS_THRESHOLD:
@@ -818,7 +818,7 @@ class MeetingMinutesApp:
                 self.log(f"文本较长({content_length}字符)，使用两阶段处理...")
                 
                 # 第一阶段：分段生成结构摘要
-                chunk_size = 15000  # 每段约15000字符
+                chunk_size = 100000  # 每段10万字符
                 chunks = self._split_text_into_chunks(content, chunk_size)
                 total_chunks = len(chunks)
                 
@@ -897,8 +897,8 @@ class MeetingMinutesApp:
         try:
             api_key = os.getenv('DEEPSEEK_API_KEY')
             api_url = os.getenv('DEEPSEEK_API_URL', 'https://api.deepseek.com/v1')
-            # 固定使用 deepseek-reasoner 模型
-            model = 'deepseek-reasoner'
+            # 固定使用 deepseek-v4-pro 模型
+            model = 'deepseek-v4-pro'
 
             self.log("正在连接 DeepSeek API...")
 
@@ -915,7 +915,7 @@ class MeetingMinutesApp:
 
             # 16K tokens 约等于 12K 汉字（1 token ≈ 0.75 汉字）
             # 预留提示词空间，设置阈值为 10000 字符
-            MAX_CHARS_PER_CHUNK = 10000
+            MAX_CHARS_PER_CHUNK = 100000
 
             if content_length <= MAX_CHARS_PER_CHUNK:
                 # 文本较短，直接处理
@@ -1023,7 +1023,7 @@ class MeetingMinutesApp:
                     {"role": "user", "content": full_prompt}
                 ],
                 temperature=0.8,
-                max_tokens=16000,
+                max_tokens=384000,
                 timeout=180
             )
 
@@ -1082,7 +1082,7 @@ class MeetingMinutesApp:
                     {"role": "user", "content": full_prompt}
                 ],
                 temperature=0.7,
-                max_tokens=8000,
+                max_tokens=384000,
                 timeout=120
             )
             
@@ -1099,16 +1099,16 @@ class MeetingMinutesApp:
         except Exception as e:
             self.log(f"    ✗ 摘要生成失败: {e}")
             # 尝试使用备用模型
-            if model != 'deepseek-chat':
-                self.log("    尝试使用 deepseek-chat 模型...")
+            if model != 'deepseek-v4-flash':
+                self.log("    尝试使用 deepseek-v4-flash 模型...")
                 response = client.chat.completions.create(
-                    model='deepseek-chat',
+                    model='deepseek-v4-flash',
                     messages=[
                         {"role": "system", "content": "你是一个专业的会议分析助手，擅长提取会议关键信息。"},
                         {"role": "user", "content": full_prompt}
                     ],
                     temperature=0.7,
-                    max_tokens=8000,
+                    max_tokens=384000,
                     timeout=120
                 )
                 summary = response.choices[0].message.content
@@ -1143,7 +1143,7 @@ class MeetingMinutesApp:
                     {"role": "user", "content": full_prompt}
                 ],
                 temperature=0.7,
-                max_tokens=16000,
+                max_tokens=384000,
                 timeout=180
             )
             
@@ -1160,16 +1160,16 @@ class MeetingMinutesApp:
         except Exception as e:
             self.log(f"  ✗ 整合失败: {e}")
             # 尝试使用备用模型
-            if model != 'deepseek-chat':
-                self.log("  尝试使用 deepseek-chat 模型...")
+            if model != 'deepseek-v4-flash':
+                self.log("  尝试使用 deepseek-v4-flash 模型...")
                 response = client.chat.completions.create(
-                    model='deepseek-chat',
+                    model='deepseek-v4-flash',
                     messages=[
                         {"role": "system", "content": "你是一个专业的会议记录员，擅长整合信息并生成结构化的会议纪要。"},
                         {"role": "user", "content": full_prompt}
                     ],
                     temperature=0.7,
-                    max_tokens=16000,
+                    max_tokens=384000,
                     timeout=180
                 )
                 minutes_text = response.choices[0].message.content
@@ -1192,7 +1192,7 @@ class MeetingMinutesApp:
                     {"role": "user", "content": full_prompt}
                 ],
                 temperature=0.7,
-                max_tokens=16000,
+                max_tokens=384000,
                 timeout=180
             )
             
@@ -1209,16 +1209,16 @@ class MeetingMinutesApp:
         except Exception as e:
             self.log(f"  ✗ 调用失败: {e}")
             # 尝试使用备用模型
-            if model != 'deepseek-chat':
-                self.log("  尝试使用 deepseek-chat 模型...")
+            if model != 'deepseek-v4-flash':
+                self.log("  尝试使用 deepseek-v4-flash 模型...")
                 response = client.chat.completions.create(
-                    model='deepseek-chat',
+                    model='deepseek-v4-flash',
                     messages=[
                         {"role": "system", "content": "你是一个专业的会议记录员，擅长从会议文本中提取关键信息并生成结构化的会议纪要。"},
                         {"role": "user", "content": full_prompt}
                     ],
                     temperature=0.7,
-                    max_tokens=16000,
+                    max_tokens=384000,
                     timeout=180
                 )
                 minutes_text = response.choices[0].message.content
@@ -1228,39 +1228,29 @@ class MeetingMinutesApp:
                 raise
     
     def _save_minutes(self, minutes_text):
-        """保存会议纪要到 Markdown 文件"""
+        """保存会议纪要（仅PDF格式）"""
         try:
-            # 生成输出文件名：源文件名字_纪要.md
+            # 生成输出文件名：源文件名字_纪要.pdf
             input_path = Path(self.current_text_path)
-            output_path = input_path.parent / f"{input_path.stem}_纪要.md"
+            pdf_path = input_path.parent / f"{input_path.stem}_纪要.pdf"
             
             # 如果文件已存在，添加序号
             counter = 1
-            original_output_path = output_path
-            while output_path.exists():
-                output_path = input_path.parent / f"{input_path.stem}_纪要_{counter}.md"
+            original_pdf_path = pdf_path
+            while pdf_path.exists():
+                pdf_path = input_path.parent / f"{input_path.stem}_纪要_{counter}.pdf"
                 counter += 1
             
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.write(minutes_text)
-            
-            self.log(f"\n✓ 会议纪要已保存到: {output_path}")
-            
-            if output_path != original_output_path:
-                self.log(f"  (原文件已存在，使用新文件名)")
-            
-            # 自动生成 PDF 文件
-            self._convert_md_to_pdf(output_path, minutes_text)
+            # 直接生成 PDF 文件（不再保存 MD）
+            self._convert_md_to_pdf(pdf_path, minutes_text)
             
         except Exception as e:
             self.log(f"保存会议纪要失败: {e}")
             raise
     
-    def _convert_md_to_pdf(self, md_path, markdown_text):
-        """将 Markdown 文件转换为 PDF"""
+    def _convert_md_to_pdf(self, pdf_path, markdown_text):
+        """将 Markdown 内容转换为 PDF"""
         try:
-            pdf_path = md_path.with_suffix('.pdf')
-            
             self.log(f"\n正在生成 PDF 文件...")
             self.log(f"目标文件: {pdf_path.name}")
             
@@ -1522,7 +1512,6 @@ class MeetingMinutesApp:
             self.log(f"✗ PDF 生成过程出错: {e}")
             import traceback
             self.log(f"详细错误: {traceback.format_exc()}")
-            self.log(f"  Markdown 文件已成功保存")
             
             # 创建带样式的 HTML
             html_template = f"""<!DOCTYPE html>
@@ -2107,9 +2096,9 @@ class MeetingMinutesApp:
             text = segment['text'].strip()
             self.log(f"[{i}] {start:.2f}s - {end:.2f}s: {text}")
         
-        # 保存转录结果，获取带时间戳格式的文本（一键模式下跳过文件保存）
+        # 保存转录结果，获取带时间戳格式的文本
         is_one_click = hasattr(self, 'one_click_mode') and self.one_click_mode
-        transcription_with_timestamps = self.save_result(merged_text, all_segments, skip_save=is_one_click)
+        transcription_with_timestamps = self.save_result(merged_text, all_segments, skip_save=False)
         
         processing_time = time.time() - self.start_time
         self.log(f"\n{'='*50}")
