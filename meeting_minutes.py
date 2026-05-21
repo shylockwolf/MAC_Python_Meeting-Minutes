@@ -1,5 +1,6 @@
 import tkinter as tk
 from tkinter import filedialog, scrolledtext, messagebox
+from tkinter.ttk import Combobox
 import threading
 import os
 import time
@@ -90,30 +91,76 @@ def split_audio_with_progress(audio_path, log_callback=None, segment_duration=90
     
     return segments
 
-def transcribe_worker(audio_path, model_path, result_queue, log_queue, segment_index=None, time_offset=0):
+def transcribe_worker(audio_path, model_type, model_path, result_queue, log_queue, segment_index=None, time_offset=0):
     try:
         prefix = f"[片段{segment_index+1}] " if segment_index is not None else ""
-        log_queue.put(f"{prefix}调用 mlx_whisper.transcribe()...")
-        
-        result = mlx_whisper.transcribe(
-            audio_path,
-            path_or_hf_repo=model_path,
-            language="zh",
-            word_timestamps=True,
-            fp16=True
-        )
-        
-        # 调整时间戳
-        if time_offset > 0 and 'segments' in result:
-            for segment in result['segments']:
-                segment['start'] += time_offset
-                segment['end'] += time_offset
-        
+
+        if model_type == "mlx_whisper":
+            log_queue.put(f"{prefix}调用 mlx_whisper.transcribe()...")
+            result = mlx_whisper.transcribe(
+                audio_path,
+                path_or_hf_repo=model_path,
+                language="zh",
+                word_timestamps=True,
+                fp16=True
+            )
+            # 调整时间戳
+            if time_offset > 0 and 'segments' in result:
+                for segment in result['segments']:
+                    segment['start'] += time_offset
+                    segment['end'] += time_offset
+
+        elif model_type == "qwen3":
+            log_queue.put(f"{prefix}调用 Qwen3-ASR 转录...")
+            from mlx_audio.stt.utils import load_model
+            from mlx_audio.stt.generate import generate_transcription
+
+            # 使用 mlx-audio 加载模型
+            log_queue.put(f"{prefix}加载 Qwen3-ASR 模型...")
+            model = load_model(model_path)
+
+            # 使用 mlx-audio 转录（mlx-audio 会自动处理音频格式转换）
+            log_queue.put(f"{prefix}开始转录...")
+            result_obj = generate_transcription(
+                model=model,
+                audio=audio_path,
+                output_path="/tmp/transcript.json",
+                format="json",
+                verbose=False,
+                max_tokens=2048,
+            )
+
+            # mlx-audio 返回的 segments 只有一个整段，转为与 mlx_whisper 相同格式
+            transcript = result_obj.text.strip() if hasattr(result_obj, 'text') else ""
+            mlx_segments = result_obj.segments if hasattr(result_obj, 'segments') else []
+            
+            # 构建与 mlx_whisper 相同的格式
+            segments_list = []
+            if mlx_segments:
+                for seg in mlx_segments:
+                    start = seg.get('start', 0) + time_offset
+                    end = seg.get('end', 0) + time_offset
+                    text = seg.get('text', '').strip()
+                    if text:
+                        segments_list.append({'start': start, 'end': end, 'text': text})
+            else:
+                # 如果没有 segments（只有一个整段），创建一个整段
+                start = time_offset
+                end = time_offset + 900  # 预估最大时长
+                segments_list.append({'start': start, 'end': end, 'text': transcript})
+
+            result = {"text": transcript, "segments": segments_list}
+            log_queue.put(f"{prefix}Qwen3-ASR 转录完成: {transcript[:100]}...")
+        else:
+            raise ValueError(f"未知模型类型: {model_type}")
+
         log_queue.put(f"{prefix}转录函数调用完成，正在处理结果...")
         result_queue.put(("success", result, segment_index))
-        
+
     except Exception as e:
+        import traceback
         log_queue.put(f"{prefix}转录过程出错: {e}")
+        log_queue.put(traceback.format_exc())
         result_queue.put(("error", str(e), segment_index))
 
 class MeetingMinutesApp:
@@ -124,7 +171,12 @@ class MeetingMinutesApp:
         
         self.transcribing = False
         self.current_audio_path = None
-        self.model_path = "../../myMLX/whisper-small-mlx"
+        # 模型选项: 显示名称 -> (模型类型, 相对路径)
+        self.asr_model_options = {
+            "whisper-small (mlx)": ("mlx_whisper", "../../myMLX/whisper-small-mlx"),
+            "Qwen3-ASR-0.6B-8bit": ("qwen3", "../../myMLX/Qwen3-ASR-0.6B-8bit"),
+        }
+        self.selected_model = tk.StringVar(value="whisper-small (mlx)")
         self.transcribe_process = None
         self.log_queue = None
         self.result_queue = None
@@ -143,9 +195,21 @@ class MeetingMinutesApp:
         # 第一行按钮 - 音频处理
         audio_frame = tk.Frame(self.root)
         audio_frame.pack(pady=5, padx=10, fill=tk.X)
-        
+
         self.open_button = tk.Button(audio_frame, text="打开音频文件", command=self.open_file, width=15)
         self.open_button.pack(side=tk.LEFT, padx=5)
+
+        # 模型选择下拉框
+        tk.Label(audio_frame, text="ASR模型:").pack(side=tk.LEFT, padx=(10, 2))
+        self.model_combo = Combobox(
+            audio_frame,
+            textvariable=self.selected_model,
+            values=list(self.asr_model_options.keys()),
+            state="readonly",
+            width=20
+        )
+        self.model_combo.pack(side=tk.LEFT, padx=2)
+        self.model_combo.bind("<<ComboboxSelected>>", self.on_model_changed)
 
         self.start_button = tk.Button(audio_frame, text="开始转录", command=self.start_transcription, width=15, state=tk.DISABLED)
         self.start_button.pack(side=tk.LEFT, padx=5)
@@ -182,7 +246,16 @@ class MeetingMinutesApp:
         self.log_text.insert(tk.END, message + "\n")
         self.log_text.see(tk.END)
         self.root.update()
-        
+
+    def on_model_changed(self, event=None):
+        model_name = self.selected_model.get()
+        model_type, model_path = self.asr_model_options[model_name]
+        self.log(f"已选择模型: {model_name}")
+
+    def get_current_model_info(self):
+        model_name = self.selected_model.get()
+        return self.asr_model_options.get(model_name, ("mlx_whisper", "../../myMLX/whisper-small-mlx"))
+
     def open_file(self):
         if self.transcribing:
             self.log("警告: 正在处理中，请先中断当前操作")
@@ -1874,11 +1947,14 @@ class MeetingMinutesApp:
 
         self.log(f"\n{'='*50}")
         self.log(f"开始处理音频: {self.current_audio_path}")
-        self.log(f"模型路径: {self.model_path}")
+        model_name = self.selected_model.get()
+        model_type, model_path = self.get_current_model_info()
+        self.log(f"ASR模型: {model_name} ({model_type})")
+        self.log(f"模型路径: {model_path}")
         self.log(f"{'='*50}\n")
 
-        if not os.path.exists(self.model_path):
-            self.log(f"错误: 模型路径不存在: {self.model_path}")
+        if not os.path.exists(model_path):
+            self.log(f"错误: 模型路径不存在: {model_path}")
             self.reset_ui()
             return
 
@@ -2049,11 +2125,14 @@ class MeetingMinutesApp:
         self.log_queue = Queue()
         self.result_queue = Queue()
         self.last_log_time = time.time()
-        
+
+        model_name = self.selected_model.get()
+        model_type, model_path = self.get_current_model_info()
+
         try:
             self.transcribe_process = Process(
                 target=transcribe_worker,
-                args=(segment_path, self.model_path, self.result_queue, self.log_queue, 
+                args=(segment_path, model_type, model_path, self.result_queue, self.log_queue,
                       self.current_segment, start_time)
             )
             self.transcribe_process.start()
