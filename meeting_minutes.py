@@ -199,18 +199,6 @@ class MeetingMinutesApp:
         self.open_button = tk.Button(audio_frame, text="打开音频文件", command=self.open_file, width=15)
         self.open_button.pack(side=tk.LEFT, padx=5)
 
-        # 模型选择下拉框
-        tk.Label(audio_frame, text="ASR模型:").pack(side=tk.LEFT, padx=(10, 2))
-        self.model_combo = Combobox(
-            audio_frame,
-            textvariable=self.selected_model,
-            values=list(self.asr_model_options.keys()),
-            state="readonly",
-            width=20
-        )
-        self.model_combo.pack(side=tk.LEFT, padx=2)
-        self.model_combo.bind("<<ComboboxSelected>>", self.on_model_changed)
-
         self.start_button = tk.Button(audio_frame, text="开始转录", command=self.start_transcription, width=15, state=tk.DISABLED)
         self.start_button.pack(side=tk.LEFT, padx=5)
 
@@ -236,6 +224,21 @@ class MeetingMinutesApp:
         self.podcast_button = tk.Button(text_frame, text="生成播客", command=self.generate_podcast, width=15, state=tk.DISABLED)
         self.podcast_button.pack(side=tk.LEFT, padx=5)
 
+        # 模型选择行 - 单独一行在所有按钮下面
+        model_frame = tk.Frame(self.root)
+        model_frame.pack(pady=5, padx=10, fill=tk.X)
+        
+        tk.Label(model_frame, text="ASR模型:").pack(side=tk.LEFT, padx=(10, 2))
+        self.model_combo = Combobox(
+            model_frame,
+            textvariable=self.selected_model,
+            values=list(self.asr_model_options.keys()),
+            state="readonly",
+            width=20
+        )
+        self.model_combo.pack(side=tk.LEFT, padx=2)
+        self.model_combo.bind("<<ComboboxSelected>>", self.on_model_changed)
+
         self.status_label = tk.Label(self.root, text="请选择音频文件或文本文件", pady=5)
         self.status_label.pack()
         
@@ -255,6 +258,16 @@ class MeetingMinutesApp:
     def get_current_model_info(self):
         model_name = self.selected_model.get()
         return self.asr_model_options.get(model_name, ("mlx_whisper", "../../myMLX/whisper-small-mlx"))
+
+    def _get_model_speed_factor(self):
+        """获取当前模型的预估速度因子（实时速度的倍数）"""
+        model_name = self.selected_model.get()
+        # mlx_whisper 在 Apple Silicon 上约 10x 实时速度
+        # Qwen3-ASR 8bit 约 7x 实时速度（含模型加载开销）
+        if "qwen" in model_name.lower():
+            return 7
+        else:
+            return 10
 
     def open_file(self):
         if self.transcribing:
@@ -281,10 +294,12 @@ class MeetingMinutesApp:
                 seconds = int(duration % 60)
                 self.log(f"音频时长: {minutes}分{seconds}秒 ({duration:.2f}秒)")
                 
-                estimated_time = duration / 10
+                # 按模型类型使用不同速度因子
+                speed_factor = self._get_model_speed_factor()
+                estimated_time = duration / speed_factor
                 est_minutes = int(estimated_time // 60)
                 est_seconds = int(estimated_time % 60)
-                self.log(f"预估处理时间: 约{est_minutes}分{est_seconds}秒 (基于10x实时速度)")
+                self.log(f"预估处理时间: 约{est_minutes}分{est_seconds}秒 (基于{speed_factor}x实时速度)")
             else:
                 self.audio_duration = None
                 self.log("无法获取音频时长信息")
@@ -2044,7 +2059,8 @@ class MeetingMinutesApp:
                     elapsed_seconds = int(elapsed_time % 60)
                     
                     if self.audio_duration:
-                        estimated_time = self.audio_duration / 10
+                        speed_factor = self._get_model_speed_factor()
+                        estimated_time = self.audio_duration / speed_factor
                         progress_percent = min((elapsed_time / estimated_time) * 100, 100)
                         est_minutes = int(estimated_time // 60)
                         est_seconds = int(estimated_time % 60)
@@ -2053,7 +2069,8 @@ class MeetingMinutesApp:
                         self.log(f"已处理: {elapsed_minutes}分{elapsed_seconds}秒")
                 
                 if self.audio_duration:
-                    estimated_time = self.audio_duration / 10
+                    speed_factor = self._get_model_speed_factor()
+                    estimated_time = self.audio_duration / speed_factor
                     timeout_threshold = estimated_time * 3
                     
                     if elapsed_time > timeout_threshold and (current_time - self.last_log_time) > 60:
