@@ -390,33 +390,52 @@ class MeetingMinutesApp:
                 base_url=api_url
             )
 
-            # 估算每段最大字符数
-            MAX_CHARS_PER_CHUNK = 100000
-
             content = self.current_text_content
             content_length = len(content)
 
             self.log(f"原始文本长度: {content_length} 字符")
 
-            # 如果文本较短，直接处理
-            if content_length <= MAX_CHARS_PER_CHUNK:
-                self.log("文本较短，直接处理...")
-                formatted_text = self._process_formatting_chunk(client, model, content, 1, 1)
-            else:
-                # 分段处理
-                chunks = self._split_text_into_chunks(content, MAX_CHARS_PER_CHUNK)
-                total_chunks = len(chunks)
-                self.log(f"文本较长，分成 {total_chunks} 段处理...")
+            # 优先按时间片段分割（如果文本包含 [MM:SS-MM:SS] 格式的时间标记）
+            time_segments = self._split_by_time_segments(content)
+            
+            # 如果片段数过多（如逐句时间戳），不适合逐个处理
+            MAX_SEGMENT_COUNT = 20
+            if time_segments and len(time_segments) > MAX_SEGMENT_COUNT:
+                self.log(f"检测到 {len(time_segments)} 个时间片段（过多），按字符数分段处理...")
+                time_segments = []
+            
+            if time_segments and len(time_segments) > 1:
+                total_chunks = len(time_segments)
+                self.log(f"检测到 {total_chunks} 个时间段片段，逐个处理...")
 
                 formatted_chunks = []
-                for i, chunk in enumerate(chunks, 1):
-                    self.log(f"\n处理第 {i}/{total_chunks} 段...")
-                    formatted_chunk = self._process_formatting_chunk(client, model, chunk, i, total_chunks)
+                for i, (timestamp, segment_text) in enumerate(time_segments, 1):
+                    self.log(f"\n处理时间段片段 {i}/{total_chunks}: {timestamp} (长度: {len(segment_text)} 字符)")
+                    formatted_chunk = self._process_formatting_chunk(client, model, segment_text, i, total_chunks, time_range=timestamp)
                     formatted_chunks.append(formatted_chunk)
 
-                # 合并所有段
-                self.log(f"\n合并 {total_chunks} 段结果...")
+                self.log(f"\n合并 {total_chunks} 个时间段片段结果...")
                 formatted_text = '\n\n'.join(formatted_chunks)
+            else:
+                # 没有时间片段标记，按字符数分段
+                MAX_CHARS_PER_CHUNK = 30000
+
+                if content_length <= MAX_CHARS_PER_CHUNK:
+                    self.log("文本较短，直接处理...")
+                    formatted_text = self._process_formatting_chunk(client, model, content, 1, 1)
+                else:
+                    chunks = self._split_text_into_chunks(content, MAX_CHARS_PER_CHUNK)
+                    total_chunks = len(chunks)
+                    self.log(f"文本较长，分成 {total_chunks} 段处理...")
+
+                    formatted_chunks = []
+                    for i, chunk in enumerate(chunks, 1):
+                        self.log(f"\n处理第 {i}/{total_chunks} 段...")
+                        formatted_chunk = self._process_formatting_chunk(client, model, chunk, i, total_chunks)
+                        formatted_chunks.append(formatted_chunk)
+
+                    self.log(f"\n合并 {total_chunks} 段结果...")
+                    formatted_text = '\n\n'.join(formatted_chunks)
 
             self.log(f"✓ 成文处理完成，总长度: {len(formatted_text)} 字符")
 
@@ -436,15 +455,27 @@ class MeetingMinutesApp:
             self.log(f"错误: 成文处理失败: {e}")
             self.root.after(0, self._reset_one_click_mode)
 
-    def _process_formatting_chunk(self, client, model, chunk, chunk_index, total_chunks):
-        """处理单个文本块（成文）"""
-        prompt = """以下是音频转文字的原始文件，请做一下处理：
-1、将连续相关的句子合并成段落，不要把每句话单独成行
-2、每个段落保留一个时间戳，格式为 [MM:SS-MM:SS]，表示该段落的开始和结束时间，如 [15:09-16:34]
+    def _process_formatting_chunk(self, client, model, chunk, chunk_index, total_chunks, time_range=None):
+        """处理单个文本块（成文）
+        
+        Args:
+            time_range: 可选，字符串如 "00:00-15:00"，表示该段文本所属的时间范围
+        """
+        time_instruction = ""
+        if time_range:
+            time_instruction = f"""\n【时间范围】这段文本对应的音频时间范围是 [{time_range}]。请根据文本在片段中的相对位置（前/中/后），估算每个段落的起止时间戳并落在 [{time_range}] 这个范围内。例如：前半部分的段落时间约为前 1/3 范围，中间部分约为中 1/3，后半部分约为后 1/3。\n"""
+
+        prompt = f"""以下是音频转文字的原始文件，请做一下格式整理：
+
+【重要原则】完整保留原文所有内容，不要做任何删减、总结、压缩或改写。原始文本中的每一句话、每个语气词（如"嗯""对吧""对不对"）、每个口语表达都要保留。
+{time_instruction}
+具体要求：
+1、将连续相关的句子合并成段落，但不要合并不同主题的内容
+2、每个段落保留一个时间戳，格式为 [MM:SS-MM:SS]，如 [15:09-16:34]
 3、每个段落的时间戳前面加4个空格，时间戳与段落文本之间空一格，如：    [15:09-16:34] 这是合并后的段落内容...
-4、语义完整的几句话合并为一个段落，段落之间用空行分隔
-5、按简体中文输出，增加适当的标点符号
-6、保持内容结构清晰，同一主题的内容放在同一个段落中
+4、语义完整且主题相关的几句话合并为一个段落，段落之间用空行分隔
+5、按简体中文输出，补充必要的标点符号（句号、逗号等）
+6、口语化的语气词（嗯、对吧、对不对等）必须保留，它们是对话的自然组成部分
 
 原始文本：
 """
@@ -619,32 +650,42 @@ class MeetingMinutesApp:
             self.log("警告: 正在处理中，请先中断当前操作")
             return
 
-        file_path = filedialog.askopenfilename(
-            title="选择文本文件",
+        file_paths = filedialog.askopenfilenames(
+            title="选择文本文件（可多选）",
             filetypes=[
                 ("文本文件", "*.txt"),
                 ("所有文件", "*.*")
             ]
         )
 
-        if file_path:
-            self.current_text_path = file_path
-            self.status_label.config(text=f"已选择文本: {os.path.basename(file_path)}")
-            self.log(f"已选择文本文件: {file_path}")
-
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                    self.current_text_content = content
-                    lines = content.count('\n') + 1
+        if file_paths:
+            self.text_files = []  # 存储所有选中的文件
+            total_chars = 0
+            for file_path in file_paths:
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    self.text_files.append((file_path, content))
                     chars = len(content)
-                    self.log(f"文件行数: {lines}, 字符数: {chars}")
-                    self.format_button.config(state=tk.NORMAL)
-                    self.minutes_button.config(state=tk.NORMAL)
-                    self.podcast_button.config(state=tk.NORMAL)
-            except Exception as e:
-                self.log(f"读取文件失败: {e}")
-                self.log(f"错误: 读取文件失败: {e}")
+                    total_chars += chars
+                    self.log(f"已加载: {os.path.basename(file_path)} ({chars} 字符)")
+                except Exception as e:
+                    self.log(f"读取 {os.path.basename(file_path)} 失败: {e}")
+
+            if self.text_files:
+                # 保持向后兼容：第一个文件作为主文件
+                self.current_text_path = self.text_files[0][0]
+                self.current_text_content = self.text_files[0][1]
+
+                if len(self.text_files) == 1:
+                    self.status_label.config(text=f"已选择文本: {os.path.basename(self.text_files[0][0])}")
+                else:
+                    self.status_label.config(text=f"已选择 {len(self.text_files)} 个文本文件，总 {total_chars} 字符")
+                    self.log(f"共选择 {len(self.text_files)} 个文本文件，总字符数: {total_chars}")
+
+                self.format_button.config(state=tk.NORMAL)
+                self.minutes_button.config(state=tk.NORMAL)
+                self.podcast_button.config(state=tk.NORMAL)
                 
     def start_formatting(self):
         if not hasattr(self, 'current_text_content'):
@@ -658,7 +699,11 @@ class MeetingMinutesApp:
             return
         
         self.log(f"\n{'='*50}")
-        self.log("开始成文处理...")
+        file_count = len(getattr(self, 'text_files', []))
+        if file_count > 1:
+            self.log(f"开始成文处理...（共 {file_count} 个文件）")
+        else:
+            self.log("开始成文处理...")
         self.log(f"{'='*50}\n")
         
         # 禁用按钮
@@ -683,42 +728,34 @@ class MeetingMinutesApp:
                 base_url=api_url
             )
             
-            # 估算每段最大字符数（预留空间给提示词和输出）
-            # DeepSeek 最大 32K tokens，约 24K 汉字
-            # 预留 4K 给提示词和输出，每段约 20K 字符
-            MAX_CHARS_PER_CHUNK = 100000  # 每段10万字符
+            # 获取所有待处理的文件
+            text_files = getattr(self, 'text_files', [])
+            if not text_files:
+                text_files = [(self.current_text_path, self.current_text_content)]
             
-            content = self.current_text_content
-            content_length = len(content)
-            
-            self.log(f"原始文本长度: {content_length} 字符")
-            
-            # 如果文本较短，直接处理
-            if content_length <= MAX_CHARS_PER_CHUNK:
-                self.log("文本较短，直接处理...")
-                formatted_text = self._process_text_chunk(client, model, content, 1, 1)
-            else:
-                # 分段处理
-                chunks = self._split_text_into_chunks(content, MAX_CHARS_PER_CHUNK)
-                total_chunks = len(chunks)
-                self.log(f"文本较长，分成 {total_chunks} 段处理...")
+            for file_idx, (file_path, file_content) in enumerate(text_files):
+                file_name = os.path.basename(file_path)
+                total_files = len(text_files)
                 
-                formatted_chunks = []
-                for i, chunk in enumerate(chunks, 1):
-                    self.log(f"\n处理第 {i}/{total_chunks} 段...")
-                    formatted_chunk = self._process_text_chunk(client, model, chunk, i, total_chunks)
-                    formatted_chunks.append(formatted_chunk)
+                self.log(f"\n{'─'*40}")
+                if total_files > 1:
+                    self.log(f"处理文件 [{file_idx + 1}/{total_files}]: {file_name}")
+                else:
+                    self.log(f"处理文件: {file_name}")
+                self.log(f"原始文本长度: {len(file_content)} 字符")
+                self.log(f"{'─'*40}")
                 
-                # 合并所有段
-                self.log(f"\n合并 {total_chunks} 段结果...")
-                formatted_text = "\n\n".join(formatted_chunks)
+                formatted_text = self._format_single_content(client, model, file_content)
+                
+                # 保存成文后的文件
+                self._save_formatted_text(formatted_text, file_path)
             
-            self.log(f"✓ 成文处理完成，总长度: {len(formatted_text)} 字符")
-            
-            # 保存成文后的文件
-            self._save_formatted_text(formatted_text)
+            self.log(f"\n{'='*50}")
+            self.log(f"✓ 全部成文处理完成（共 {len(text_files)} 个文件）")
+            self.log(f"{'='*50}")
             
             # 更新状态
+            self.root.after(0, lambda: self.format_button.config(state=tk.NORMAL))
             self.root.after(0, lambda: self.minutes_button.config(state=tk.NORMAL))
             self.root.after(0, lambda: self.open_text_button.config(state=tk.NORMAL))
             
@@ -730,6 +767,88 @@ class MeetingMinutesApp:
             self.root.after(0, lambda: self.format_button.config(state=tk.NORMAL))
             self.root.after(0, lambda: self.open_text_button.config(state=tk.NORMAL))
     
+    def _format_single_content(self, client, model, content):
+        """处理单个文本内容，返回格式化后的文本"""
+        content_length = len(content)
+        
+        # 优先按时间片段分割（如果文本包含 [MM:SS-MM:SS] 格式的时间标记）
+        time_segments = self._split_by_time_segments(content)
+        
+        # 如果片段数过多（如逐句时间戳），不适合逐个处理，改为按字符数分段
+        MAX_SEGMENT_COUNT = 20
+        if time_segments and len(time_segments) > MAX_SEGMENT_COUNT:
+            self.log(f"检测到 {len(time_segments)} 个时间片段（过多），按字符数分段处理（逐句时间戳将直接传给AI用于精确计时）...")
+            time_segments = []  # 置空，走字符数分段逻辑
+        
+        if time_segments and len(time_segments) > 1:
+            total_chunks = len(time_segments)
+            self.log(f"检测到 {total_chunks} 个时间段片段，逐个处理...")
+            
+            formatted_chunks = []
+            for i, (timestamp, segment_text) in enumerate(time_segments, 1):
+                self.log(f"\n处理时间段片段 {i}/{total_chunks}: {timestamp} (长度: {len(segment_text)} 字符)")
+                formatted_chunk = self._process_text_chunk(client, model, segment_text, i, total_chunks, time_range=timestamp)
+                formatted_chunks.append(formatted_chunk)
+            
+            self.log(f"\n合并 {total_chunks} 个时间段片段结果...")
+            return "\n\n".join(formatted_chunks)
+        else:
+            # 没有时间片段标记，按字符数分段
+            MAX_CHARS_PER_CHUNK = 30000
+            
+            if content_length <= MAX_CHARS_PER_CHUNK:
+                self.log("文本较短，直接处理...")
+                return self._process_text_chunk(client, model, content, 1, 1)
+            else:
+                chunks = self._split_text_into_chunks(content, MAX_CHARS_PER_CHUNK)
+                total_chunks = len(chunks)
+                self.log(f"文本较长，分成 {total_chunks} 段处理...")
+                
+                formatted_chunks = []
+                for i, chunk in enumerate(chunks, 1):
+                    self.log(f"\n处理第 {i}/{total_chunks} 段...")
+                    formatted_chunk = self._process_text_chunk(client, model, chunk, i, total_chunks)
+                    formatted_chunks.append(formatted_chunk)
+                
+                self.log(f"\n合并 {total_chunks} 段结果...")
+                return "\n\n".join(formatted_chunks)
+    
+    def _split_by_time_segments(self, text):
+        """按 [MM:SS-MM:SS] 格式的时间标记分割文本
+        
+        返回列表: [(timestamp, segment_text), ...]
+        如果文本中没有时间标记，返回空列表
+        """
+        import re
+        # 匹配形如 [00:00-15:00] 或 [15:00-30:00] 的时间标记
+        pattern = r'(\[\d{2}:\d{2}-\d{2}:\d{2}\])'
+        
+        parts = re.split(pattern, text)
+        if len(parts) <= 1:
+            return []
+        
+        # 去掉时间标记之前可能有的文件头信息（如"会议纪要文本"等）
+        # 找到第一个时间标记的位置
+        segments = []
+        current_timestamp = None
+        header_text = ""
+        
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            if re.match(r'^\[\d{2}:\d{2}-\d{2}:\d{2}\]$', part):
+                current_timestamp = part.strip('[]')
+            else:
+                if current_timestamp:
+                    # 这是某个时间片段后面的正文
+                    # 去除行首可能的多余时间戳前缀（同一行内）
+                    text = part.strip()
+                    segments.append((current_timestamp, text))
+                    current_timestamp = None
+        
+        return segments
+
     def _split_text_into_chunks(self, text, max_chars):
         """将文本分割成多个块，尽量在句子边界处分割"""
         lines = text.split('\n')
@@ -755,15 +874,27 @@ class MeetingMinutesApp:
         
         return chunks
     
-    def _process_text_chunk(self, client, model, chunk, chunk_index, total_chunks):
-        """处理单个文本块"""
-        prompt = """以下是音频转文字的原始文件，请做一下处理：
-1、将连续相关的句子合并成段落，不要把每句话单独成行
-2、每个段落保留一个时间戳，格式为 [MM:SS-MM:SS]，表示该段落的开始和结束时间，如 [15:09-16:34]
+    def _process_text_chunk(self, client, model, chunk, chunk_index, total_chunks, time_range=None):
+        """处理单个文本块
+        
+        Args:
+            time_range: 可选，字符串如 "00:00-15:00"，表示该段文本所属的时间范围
+        """
+        time_instruction = ""
+        if time_range:
+            time_instruction = f"""\n【时间范围】这段文本对应的音频时间范围是 [{time_range}]。请根据文本在片段中的相对位置（前/中/后），估算每个段落的起止时间戳并落在 [{time_range}] 这个范围内。例如：前半部分的段落时间约为前 1/3 范围，中间部分约为中 1/3，后半部分约为后 1/3。\n"""
+
+        prompt = f"""以下是音频转文字的原始文件，请做一下格式整理：
+
+【重要原则】完整保留原文所有内容，不要做任何删减、总结、压缩或改写。原始文本中的每一句话、每个语气词（如"嗯""对吧""对不对"）、每个口语表达都要保留。
+{time_instruction}
+具体要求：
+1、将连续相关的句子合并成段落，但不要合并不同主题的内容
+2、每个段落保留一个时间戳，格式为 [MM:SS-MM:SS]，如 [15:09-16:34]
 3、每个段落的时间戳前面加4个空格，时间戳与段落文本之间空一格，如：    [15:09-16:34] 这是合并后的段落内容...
-4、语义完整的几句话合并为一个段落，段落之间用空行分隔
-5、按简体中文输出，增加适当的标点符号
-6、保持内容结构清晰，同一主题的内容放在同一个段落中
+4、语义完整且主题相关的几句话合并为一个段落，段落之间用空行分隔
+5、按简体中文输出，补充必要的标点符号（句号、逗号等）
+6、口语化的语气词（嗯、对吧、对不对等）必须保留，它们是对话的自然组成部分
 
 原始文本：
 """
@@ -815,18 +946,20 @@ class MeetingMinutesApp:
             else:
                 raise
     
-    def _save_formatted_text(self, formatted_text):
+    def _save_formatted_text(self, formatted_text, file_path=None):
         try:
             # 生成输出文件名：源文件名字_成文.txt
-            input_path = Path(self.current_text_path)
+            if file_path is None:
+                file_path = self.current_text_path
+            input_path = Path(file_path)
             output_path = input_path.parent / f"{input_path.stem}_成文.txt"
             
             with open(output_path, 'w', encoding='utf-8') as f:
                 f.write(formatted_text)
             
-            self.log(f"\n✓ 成文结果已保存到: {output_path}")
+            self.log(f"✓ 成文结果已保存到: {output_path}")
             
-            # 保存成文后的内容，供生成会议纪要使用
+            # 保存成文后的内容，供生成会议纪要使用（最后一个处理的文件）
             self.formatted_text_content = formatted_text
             self.formatted_text_path = str(output_path)
             
