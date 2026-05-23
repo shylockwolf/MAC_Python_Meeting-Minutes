@@ -127,7 +127,7 @@ def transcribe_worker(audio_path, model_type, model_path, result_queue, log_queu
                 output_path="/tmp/transcript.json",
                 format="json",
                 verbose=False,
-                max_tokens=2048,
+                max_tokens=8192,
             )
 
             # mlx-audio 返回的 segments 只有一个整段，转为与 mlx_whisper 相同格式
@@ -461,6 +461,21 @@ class MeetingMinutesApp:
         Args:
             time_range: 可选，字符串如 "00:00-15:00"，表示该段文本所属的时间范围
         """
+        # 如果文本块超过安全上限，拆分为子段分别处理
+        if len(chunk) > self.CHUNK_CHAR_LIMIT:
+            sub_chunks = self._split_text_into_chunks(chunk, self.CHUNK_CHAR_LIMIT)
+            # 防无限递归：如果拆分后仍只有一个块且大小没变，说明无法再拆分，直接处理
+            if len(sub_chunks) <= 1 and len(sub_chunks[0]) >= len(chunk):
+                self.log(f"  警告: 文本块过大({len(chunk)}字符)且无法拆分，尝试直接处理...")
+            else:
+                sub_time_ranges = self._divide_time_range(time_range, len(sub_chunks))
+                sub_results = []
+                for i, (sub_chunk, sub_tr) in enumerate(zip(sub_chunks, sub_time_ranges), 1):
+                    self.log(f"    拆分子段 {i}/{len(sub_chunks)} ({len(sub_chunk)}字符, 时间范围: {sub_tr or '无'})...")
+                    sub_result = self._process_formatting_chunk(client, model, sub_chunk, i, len(sub_chunks), time_range=sub_tr)
+                    sub_results.append(sub_result)
+                return '\n\n'.join(sub_results)
+
         time_instruction = ""
         if time_range:
             time_instruction = f"""\n【时间范围】这段文本对应的音频时间范围是 [{time_range}]。请根据文本在片段中的相对位置（前/中/后），估算每个段落的起止时间戳并落在 [{time_range}] 这个范围内。例如：前半部分的段落时间约为前 1/3 范围，中间部分约为中 1/3，后半部分约为后 1/3。\n"""
@@ -820,8 +835,8 @@ class MeetingMinutesApp:
         如果文本中没有时间标记，返回空列表
         """
         import re
-        # 匹配形如 [00:00-15:00] 或 [15:00-30:00] 的时间标记
-        pattern = r'(\[\d{2}:\d{2}-\d{2}:\d{2}\])'
+        # 匹配形如 [00:00-15:00] 或 [105:00-116:16] 的时间标记（支持2-3位分钟数）
+        pattern = r'(\[\d{2,3}:\d{2}-\d{2,3}:\d{2}\])'
         
         parts = re.split(pattern, text)
         if len(parts) <= 1:
@@ -837,7 +852,7 @@ class MeetingMinutesApp:
             part = part.strip()
             if not part:
                 continue
-            if re.match(r'^\[\d{2}:\d{2}-\d{2}:\d{2}\]$', part):
+            if re.match(r'^\[\d{2,3}:\d{2}-\d{2,3}:\d{2}\]$', part):
                 current_timestamp = part.strip('[]')
             else:
                 if current_timestamp:
@@ -850,36 +865,111 @@ class MeetingMinutesApp:
         return segments
 
     def _split_text_into_chunks(self, text, max_chars):
-        """将文本分割成多个块，尽量在句子边界处分割"""
-        lines = text.split('\n')
+        """将文本分割成多个块，尽量在句子边界处分割
+        
+        优先在换行/句号处分割；当单行超过 max_chars 时按字符截断。
+        """
+        # 先按换行分割
+        raw_lines = text.split('\n')
+        
+        # 展开长行：对每行，如果超过 max_chars，按句子边界（句号、问号等）再切分
+        sentences = []
+        for line in raw_lines:
+            if len(line) <= max_chars:
+                sentences.append(line)
+            else:
+                # 按句子分隔符切分长行
+                parts = re.split(r'([。！？；])', line)
+                merged = []
+                buf = ''
+                for part in parts:
+                    if part in ('。', '！', '？', '；'):
+                        buf += part
+                        merged.append(buf)
+                        buf = ''
+                    else:
+                        buf += part
+                if buf:
+                    merged.append(buf)
+                # 如果按句子切分后仍有超长的句子，退化为固定长度截断
+                for sent in merged:
+                    if len(sent) <= max_chars:
+                        sentences.append(sent)
+                    else:
+                        # 固定长度截断（最后手段）
+                        for pos in range(0, len(sent), max_chars):
+                            sentences.append(sent[pos:pos + max_chars])
+
+        # 按 max_chars 组装句子为块
         chunks = []
         current_chunk = []
         current_length = 0
-        
-        for line in lines:
-            line_length = len(line)
-            
-            # 如果当前行加上去会超过限制，先保存当前块
-            if current_length + line_length > max_chars and current_chunk:
+        for sent in sentences:
+            sent_len = len(sent)
+            if current_chunk and current_length + sent_len > max_chars:
                 chunks.append('\n'.join(current_chunk))
                 current_chunk = []
                 current_length = 0
-            
-            current_chunk.append(line)
-            current_length += line_length + 1  # +1 for newline
+            current_chunk.append(sent)
+            current_length += sent_len + 1  # +1 for separator
         
-        # 添加最后一个块
         if current_chunk:
             chunks.append('\n'.join(current_chunk))
         
         return chunks
     
+    # 单个文本块的安全处理上限（字符），超过此值自动拆分为子段
+    # 防止 API 输出 token 上限导致尾部内容被截断
+    CHUNK_CHAR_LIMIT = 15000
+
+    def _parse_time_to_seconds(self, time_str):
+        """将 MM:SS 或 MMM:SS 格式的时间字符串转为秒数"""
+        parts = time_str.strip().split(':')
+        return int(parts[0]) * 60 + int(parts[1])
+
+    def _seconds_to_time_str(self, total_seconds):
+        """将秒数转为 MM:SS 格式的时间字符串"""
+        minutes = int(total_seconds // 60)
+        seconds = int(total_seconds % 60)
+        return f"{minutes:02d}:{seconds:02d}"
+
+    def _divide_time_range(self, time_range, num_sub_chunks):
+        """将时间范围按比例均分为 num_sub_chunks 个子时间范围"""
+        if not time_range or num_sub_chunks <= 1:
+            return [time_range] * num_sub_chunks
+        parts = time_range.split('-')
+        start_sec = self._parse_time_to_seconds(parts[0].strip())
+        end_sec = self._parse_time_to_seconds(parts[1].strip())
+        total_duration = end_sec - start_sec
+        per_chunk_duration = total_duration / num_sub_chunks
+        sub_ranges = []
+        for i in range(num_sub_chunks):
+            sub_start = start_sec + i * per_chunk_duration
+            sub_end = min(start_sec + (i + 1) * per_chunk_duration, end_sec)
+            sub_ranges.append(f"{self._seconds_to_time_str(sub_start)}-{self._seconds_to_time_str(sub_end)}")
+        return sub_ranges
+
     def _process_text_chunk(self, client, model, chunk, chunk_index, total_chunks, time_range=None):
         """处理单个文本块
         
         Args:
             time_range: 可选，字符串如 "00:00-15:00"，表示该段文本所属的时间范围
         """
+        # 如果文本块超过安全上限，拆分为子段分别处理
+        if len(chunk) > self.CHUNK_CHAR_LIMIT:
+            sub_chunks = self._split_text_into_chunks(chunk, self.CHUNK_CHAR_LIMIT)
+            # 防无限递归：如果拆分后仍只有一个块且大小没变，说明无法再拆分，直接处理
+            if len(sub_chunks) <= 1 and len(sub_chunks[0]) >= len(chunk):
+                self.log(f"  警告: 文本块过大({len(chunk)}字符)且无法拆分，尝试直接处理...")
+            else:
+                sub_time_ranges = self._divide_time_range(time_range, len(sub_chunks))
+                sub_results = []
+                for i, (sub_chunk, sub_tr) in enumerate(zip(sub_chunks, sub_time_ranges), 1):
+                    self.log(f"    拆分子段 {i}/{len(sub_chunks)} ({len(sub_chunk)}字符, 时间范围: {sub_tr or '无'})...")
+                    sub_result = self._process_text_chunk(client, model, sub_chunk, i, len(sub_chunks), time_range=sub_tr)
+                    sub_results.append(sub_result)
+                return '\n\n'.join(sub_results)
+
         time_instruction = ""
         if time_range:
             time_instruction = f"""\n【时间范围】这段文本对应的音频时间范围是 [{time_range}]。请根据文本在片段中的相对位置（前/中/后），估算每个段落的起止时间戳并落在 [{time_range}] 这个范围内。例如：前半部分的段落时间约为前 1/3 范围，中间部分约为中 1/3，后半部分约为后 1/3。\n"""
