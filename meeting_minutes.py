@@ -13,6 +13,7 @@ import mlx_whisper
 from pathlib import Path
 from dotenv import load_dotenv
 from openai import OpenAI
+import httpx
 import markdown
 import re
 
@@ -387,7 +388,8 @@ class MeetingMinutesApp:
 
             client = OpenAI(
                 api_key=api_key,
-                base_url=api_url
+                base_url=api_url,
+                timeout=httpx.Timeout(300.0, connect=30.0)
             )
 
             content = self.current_text_content
@@ -398,11 +400,12 @@ class MeetingMinutesApp:
             # 优先按时间片段分割（如果文本包含 [MM:SS-MM:SS] 格式的时间标记）
             time_segments = self._split_by_time_segments(content)
             
-            # 如果片段数过多（如逐句时间戳），不适合逐个处理
-            MAX_SEGMENT_COUNT = 20
+            # 如果时间片段过多（如逐句 ASR），合并为大时间块以保持上下文连贯
+            MAX_SEGMENT_COUNT = 50
             if time_segments and len(time_segments) > MAX_SEGMENT_COUNT:
-                self.log(f"检测到 {len(time_segments)} 个时间片段（过多），按字符数分段处理...")
-                time_segments = []
+                self.log(f"检测到 {len(time_segments)} 个密集时间片段，合并为较大的时间块以保持上下文连贯...")
+                time_segments = self._merge_dense_time_segments(time_segments)
+                self.log(f"合并后: {len(time_segments)} 个时间块")
             
             if time_segments and len(time_segments) > 1:
                 total_chunks = len(time_segments)
@@ -461,6 +464,12 @@ class MeetingMinutesApp:
         Args:
             time_range: 可选，字符串如 "00:00-15:00"，表示该段文本所属的时间范围
         """
+        # 检测是否为填充词密集段，如果是则跳过API调用
+        is_filler, filler_ratio = self._is_filler_heavy_segment(chunk)
+        if is_filler:
+            self.log(f"  跳过: 填充词占比 {filler_ratio:.0%}，无有效语义内容")
+            return f"    [{time_range or '--:--'}] （此段主要为语气填充词，无实际对话内容）"
+
         # 如果文本块超过安全上限，拆分为子段分别处理
         if len(chunk) > self.CHUNK_CHAR_LIMIT:
             sub_chunks = self._split_text_into_chunks(chunk, self.CHUNK_CHAR_LIMIT)
@@ -507,8 +516,7 @@ class MeetingMinutesApp:
                     {"role": "user", "content": full_prompt}
                 ],
                 temperature=0.7,
-                max_tokens=384000,
-                timeout=180
+                max_tokens=384000
             )
 
             formatted_text = response.choices[0].message.content
@@ -533,8 +541,7 @@ class MeetingMinutesApp:
                         {"role": "user", "content": full_prompt}
                     ],
                     temperature=0.7,
-                    max_tokens=384000,
-                    timeout=180
+                    max_tokens=384000
                 )
                 formatted_text = response.choices[0].message.content
                 self.log(f"  ✓ 备用模型完成，返回长度: {len(formatted_text)} 字符")
@@ -589,7 +596,8 @@ class MeetingMinutesApp:
 
             client = OpenAI(
                 api_key=api_key,
-                base_url=api_url
+                base_url=api_url,
+                timeout=httpx.Timeout(300.0, connect=30.0)
             )
 
             # 使用成文后的内容
@@ -740,7 +748,8 @@ class MeetingMinutesApp:
             
             client = OpenAI(
                 api_key=api_key,
-                base_url=api_url
+                base_url=api_url,
+                timeout=httpx.Timeout(300.0, connect=30.0)
             )
             
             # 获取所有待处理的文件
@@ -789,11 +798,12 @@ class MeetingMinutesApp:
         # 优先按时间片段分割（如果文本包含 [MM:SS-MM:SS] 格式的时间标记）
         time_segments = self._split_by_time_segments(content)
         
-        # 如果片段数过多（如逐句时间戳），不适合逐个处理，改为按字符数分段
-        MAX_SEGMENT_COUNT = 20
+        # 如果时间片段过多（如逐句 ASR），合并为大时间块以保持上下文连贯
+        MAX_SEGMENT_COUNT = 50
         if time_segments and len(time_segments) > MAX_SEGMENT_COUNT:
-            self.log(f"检测到 {len(time_segments)} 个时间片段（过多），按字符数分段处理（逐句时间戳将直接传给AI用于精确计时）...")
-            time_segments = []  # 置空，走字符数分段逻辑
+            self.log(f"检测到 {len(time_segments)} 个密集时间片段，合并为较大的时间块以保持上下文连贯...")
+            time_segments = self._merge_dense_time_segments(time_segments)
+            self.log(f"合并后: {len(time_segments)} 个时间块")
         
         if time_segments and len(time_segments) > 1:
             total_chunks = len(time_segments)
@@ -828,6 +838,51 @@ class MeetingMinutesApp:
                 self.log(f"\n合并 {total_chunks} 段结果...")
                 return "\n\n".join(formatted_chunks)
     
+    def _merge_dense_time_segments(self, time_segments, target_minutes=12):
+        """将大量密集的微小时间片段合并为较大的时间块
+        
+        适用于 whisper 等逐句 ASR 输出（数千个 ~2秒 片段），
+        按累计时长合并为约 target_minutes 分钟的大块，保持对话上下文连贯。
+        
+        Args:
+            time_segments: [(timestamp_str, text), ...] 格式如 [("00:00-00:02", "你好"), ...]
+            target_minutes: 目标每块分钟数，默认 12 分钟
+        
+        Returns:
+            合并后的 [(timestamp_str, merged_text), ...]
+        """
+        if not time_segments:
+            return []
+        
+        target_seconds = target_minutes * 60
+        merged = []
+        current_texts = []
+        current_duration = 0.0
+        block_start_ts = None
+        
+        for i, (timestamp, text) in enumerate(time_segments):
+            parts = timestamp.split('-')
+            start_sec = self._parse_time_to_seconds(parts[0].strip())
+            end_sec = self._parse_time_to_seconds(parts[1].strip())
+            seg_duration = max(end_sec - start_sec, 1)  # 至少算 1 秒
+            
+            if block_start_ts is None:
+                block_start_ts = parts[0].strip()
+            
+            current_texts.append(text)
+            current_duration += seg_duration
+            
+            # 达到目标时长或最后一个片段时创建一个块
+            if current_duration >= target_seconds or i == len(time_segments) - 1:
+                merged_ts = f"{block_start_ts}-{parts[1].strip()}"
+                merged_text = '\n'.join(current_texts)
+                merged.append((merged_ts, merged_text))
+                current_texts = []
+                current_duration = 0.0
+                block_start_ts = None
+        
+        return merged
+
     def _split_by_time_segments(self, text):
         """按 [MM:SS-MM:SS] 格式的时间标记分割文本
         
@@ -922,6 +977,9 @@ class MeetingMinutesApp:
     # 防止 API 输出 token 上限导致尾部内容被截断
     CHUNK_CHAR_LIMIT = 15000
 
+    # 填充词比例阈值：如果文本非空白字符中填充词（嗯/啊/哦/额等）占比超过此值，视作无效片段跳过
+    FILLER_RATIO_THRESHOLD = 0.6
+
     def _parse_time_to_seconds(self, time_str):
         """将 MM:SS 或 MMM:SS 格式的时间字符串转为秒数"""
         parts = time_str.strip().split(':')
@@ -949,12 +1007,30 @@ class MeetingMinutesApp:
             sub_ranges.append(f"{self._seconds_to_time_str(sub_start)}-{self._seconds_to_time_str(sub_end)}")
         return sub_ranges
 
+    def _is_filler_heavy_segment(self, text):
+        """检测片段是否由大量填充词组成（如全是"嗯嗯嗯"），这类片段没有实际语义，应跳过"""
+        import re
+        # 提取所有非空白、非标点字符
+        chars = re.sub(r'[\s\d\.\,\!\?\;\:\'\"\-\–\—\(\)\[\]\{\}…、。，！？；：""''【】]', '', text)
+        if len(chars) == 0:
+            return True, 0.0
+        # 统计单音节填充词：嗯、啊、哦、额、唔、噢、唉、哎、诶
+        filler_chars = sum(1 for c in chars if c in '嗯啊哦额唔噢唉哎诶')
+        ratio = filler_chars / len(chars)
+        return ratio >= self.FILLER_RATIO_THRESHOLD, ratio
+
     def _process_text_chunk(self, client, model, chunk, chunk_index, total_chunks, time_range=None):
         """处理单个文本块
         
         Args:
             time_range: 可选，字符串如 "00:00-15:00"，表示该段文本所属的时间范围
         """
+        # 检测是否为填充词密集段，如果是则跳过API调用
+        is_filler, filler_ratio = self._is_filler_heavy_segment(chunk)
+        if is_filler:
+            self.log(f"  跳过: 填充词占比 {filler_ratio:.0%}，无有效语义内容")
+            return f"    [{time_range or '--:--'}] （此段主要为语气填充词，无实际对话内容）"
+
         # 如果文本块超过安全上限，拆分为子段分别处理
         if len(chunk) > self.CHUNK_CHAR_LIMIT:
             sub_chunks = self._split_text_into_chunks(chunk, self.CHUNK_CHAR_LIMIT)
@@ -1001,8 +1077,7 @@ class MeetingMinutesApp:
                     {"role": "user", "content": full_prompt}
                 ],
                 temperature=0.7,
-                max_tokens=384000,  # 增加到最大限制
-                timeout=180  # 增加到3分钟
+                max_tokens=384000
             )
             
             formatted_text = response.choices[0].message.content
@@ -1027,8 +1102,7 @@ class MeetingMinutesApp:
                         {"role": "user", "content": full_prompt}
                     ],
                     temperature=0.7,
-                    max_tokens=384000,
-                    timeout=180
+                    max_tokens=384000
                 )
                 formatted_text = response.choices[0].message.content
                 self.log(f"  ✓ 备用模型完成，返回长度: {len(formatted_text)} 字符")
@@ -1106,7 +1180,8 @@ class MeetingMinutesApp:
             
             client = OpenAI(
                 api_key=api_key,
-                base_url=api_url
+                base_url=api_url,
+                timeout=httpx.Timeout(300.0, connect=30.0)
             )
             
             # 使用成文后的内容，如果没有则使用原始内容
@@ -1215,7 +1290,8 @@ class MeetingMinutesApp:
 
             client = OpenAI(
                 api_key=api_key,
-                base_url=api_url
+                base_url=api_url,
+                timeout=httpx.Timeout(300.0, connect=30.0)
             )
 
             # 使用成文后的内容，如果没有则使用原始内容
@@ -1334,8 +1410,7 @@ class MeetingMinutesApp:
                     {"role": "user", "content": full_prompt}
                 ],
                 temperature=0.8,
-                max_tokens=384000,
-                timeout=180
+                max_tokens=384000
             )
 
             podcast_text = response.choices[0].message.content
@@ -1393,8 +1468,7 @@ class MeetingMinutesApp:
                     {"role": "user", "content": full_prompt}
                 ],
                 temperature=0.7,
-                max_tokens=384000,
-                timeout=120
+                max_tokens=384000
             )
             
             summary = response.choices[0].message.content
@@ -1419,8 +1493,7 @@ class MeetingMinutesApp:
                         {"role": "user", "content": full_prompt}
                     ],
                     temperature=0.7,
-                    max_tokens=384000,
-                    timeout=120
+                    max_tokens=384000
                 )
                 summary = response.choices[0].message.content
                 self.log(f"    ✓ 备用模型完成，长度: {len(summary)} 字符")
@@ -1454,8 +1527,7 @@ class MeetingMinutesApp:
                     {"role": "user", "content": full_prompt}
                 ],
                 temperature=0.7,
-                max_tokens=384000,
-                timeout=180
+                max_tokens=384000
             )
             
             minutes_text = response.choices[0].message.content
@@ -1480,8 +1552,7 @@ class MeetingMinutesApp:
                         {"role": "user", "content": full_prompt}
                     ],
                     temperature=0.7,
-                    max_tokens=384000,
-                    timeout=180
+                    max_tokens=384000
                 )
                 minutes_text = response.choices[0].message.content
                 self.log(f"  ✓ 备用模型完成，长度: {len(minutes_text)} 字符")
@@ -1503,8 +1574,7 @@ class MeetingMinutesApp:
                     {"role": "user", "content": full_prompt}
                 ],
                 temperature=0.7,
-                max_tokens=384000,
-                timeout=180
+                max_tokens=384000
             )
             
             minutes_text = response.choices[0].message.content
@@ -1529,8 +1599,7 @@ class MeetingMinutesApp:
                         {"role": "user", "content": full_prompt}
                     ],
                     temperature=0.7,
-                    max_tokens=384000,
-                    timeout=180
+                    max_tokens=384000
                 )
                 minutes_text = response.choices[0].message.content
                 self.log(f"  ✓ 备用模型完成，返回长度: {len(minutes_text)} 字符")
