@@ -442,6 +442,10 @@ class MeetingMinutesApp:
 
             self.log(f"✓ 成文处理完成，总长度: {len(formatted_text)} 字符")
 
+            # 后处理：消除ASR噪声（连续重复的"对"字）
+            formatted_text = self._clean_asr_noise(formatted_text)
+            self.log(f"✓ ASR噪声清洗完成，总长度: {len(formatted_text)} 字符")
+
             # 保存成文后的内容
             self.formatted_text_content = formatted_text
 
@@ -491,15 +495,18 @@ class MeetingMinutesApp:
 
         prompt = f"""以下是音频转文字的原始文件，请做一下格式整理：
 
-【重要原则】完整保留原文所有内容，不要做任何删减、总结、压缩或改写。原始文本中的每一句话、每个语气词（如"嗯""对吧""对不对"）、每个口语表达都要保留。
+【重要原则】完整保留原文所有有效内容，不要做任何删减、总结、压缩或改写。原始文本中的每一句话、每个口语表达都要保留。
+【噪声处理】ASR识别可能产生重复的语气词（如连续的"对"），请消除这些重复噪声，但保留正常对话中的语气词（如"嗯""对吧""对不对"）。
 {time_instruction}
 具体要求：
-1、将连续相关的句子合并成段落，但不要合并不同主题的内容
-2、每个段落保留一个时间戳，格式为 [MM:SS-MM:SS]，如 [15:09-16:34]
-3、每个段落的时间戳前面加4个空格，时间戳与段落文本之间空一格，如：    [15:09-16:34] 这是合并后的段落内容...
-4、语义完整且主题相关的几句话合并为一个段落，段落之间用空行分隔
-5、按简体中文输出，补充必要的标点符号（句号、逗号等）
-6、口语化的语气词（嗯、对吧、对不对等）必须保留，它们是对话的自然组成部分
+1、按语义适当分段，每个段落不宜过长（建议2-5句话为一个段落），便于阅读
+2、将连续相关的句子合并成段落，但不要合并不同主题的内容
+3、每个段落保留一个时间戳，格式为 [MM:SS-MM:SS]，如 [15:09-16:34]
+4、每个段落的时间戳前面加4个空格，时间戳与段落文本之间空一格，如：    [15:09-16:34] 这是合并后的段落内容...
+5、语义完整且主题相关的几句话合并为一个段落，段落之间用空行分隔
+6、按简体中文输出，补充必要的标点符号（句号、逗号等）
+7、消除连续重复的"对"字（如"对对对""对对对"），只保留一个；但保留正常对话中的"对"（如"对，是的"）
+8、口语化的语气词（嗯、对吧、对不对等）必须保留，它们是对话的自然组成部分
 
 原始文本：
 """
@@ -828,14 +835,21 @@ class MeetingMinutesApp:
                 formatted_chunks.append(formatted_chunk)
             
             self.log(f"\n合并 {total_chunks} 个时间段片段结果...")
-            return "\n\n".join(formatted_chunks)
+            formatted_text = "\n\n".join(formatted_chunks)
+            
+            # 后处理：消除ASR噪声（连续重复的"对"字）
+            formatted_text = self._clean_asr_noise(formatted_text)
+            return formatted_text
         else:
             # 没有时间片段标记，按字符数分段
             MAX_CHARS_PER_CHUNK = 30000
             
             if content_length <= MAX_CHARS_PER_CHUNK:
                 self.log("文本较短，直接处理...")
-                return self._process_text_chunk(client, model, content, 1, 1)
+                formatted_text = self._process_text_chunk(client, model, content, 1, 1)
+                # 后处理：消除ASR噪声（连续重复的"对"字）
+                formatted_text = self._clean_asr_noise(formatted_text)
+                return formatted_text
             else:
                 chunks = self._split_text_into_chunks(content, MAX_CHARS_PER_CHUNK)
                 total_chunks = len(chunks)
@@ -848,7 +862,11 @@ class MeetingMinutesApp:
                     formatted_chunks.append(formatted_chunk)
                 
                 self.log(f"\n合并 {total_chunks} 段结果...")
-                return "\n\n".join(formatted_chunks)
+            formatted_text = "\n\n".join(formatted_chunks)
+            
+            # 后处理：消除ASR噪声（连续重复的"对"字）
+            formatted_text = self._clean_asr_noise(formatted_text)
+            return formatted_text
     
     def _merge_dense_time_segments(self, time_segments, target_minutes=12):
         """将大量密集的微小时间片段合并为较大的时间块
@@ -930,6 +948,41 @@ class MeetingMinutesApp:
                     current_timestamp = None
         
         return segments
+
+    def _clean_asr_noise(self, text):
+        """消除ASR识别产生的噪声
+        
+        主要处理：
+        1、连续重复的单字（如"对对对""嗯嗯嗯""好好好"），只保留一个
+        2、连续重复的词语（如"是的是的是的""这个这个这个"），只保留一个
+        3、连续重复的语气词（如"嗯嗯嗯""啊啊啊"），保留两个表示强调
+        4、连续重复的标点符号
+        5、连续重复的空格
+        6、逗号分隔的重复单字（如"，对，对，对，对"），只保留一个
+        """
+        # 消除连续重复的词语（如"是的是的是的""这个这个这个"），只保留一个
+        # 匹配2-4字的词重复出现2次以上
+        for length in range(4, 1, -1):
+            pattern = r'(.{' + str(length) + r'})\1{2,}'
+            text = re.sub(pattern, r'\1', text)
+        
+        # 消除连续重复的单字（如"对对对""嗯嗯嗯""好好好"），只保留一个
+        text = re.sub(r'([\u4e00-\u9fa5])\1{2,}', r'\1', text)
+        
+        # 消除逗号分隔的重复单字（如"，对，对，对，对"），只保留一个
+        # 匹配模式：，X，X，X 或 ，X， X， X（可能有空格）
+        text = re.sub(r'，\s*([\u4e00-\u9fa5])(，\s*\1){2,}', r'，\1', text)
+        
+        # 消除连续重复的标点符号（如"。。。""，，"）
+        text = re.sub(r'([，。！？、；：]){2,}', r'\1', text)
+        
+        # 消除连续重复的空格
+        text = re.sub(r' {2,}', ' ', text)
+        
+        # 消除连续重复的语气词（如"嗯嗯嗯""啊啊啊"），保留两个表示强调
+        text = re.sub(r'(嗯{3,}|啊{3,}|哦{3,}|呀{3,}|哈{3,}|嘿{3,})', r'\1'[:2], text)
+        
+        return text
 
     def _split_text_into_chunks(self, text, max_chars):
         """将文本分割成多个块，尽量在句子边界处分割
@@ -1064,15 +1117,18 @@ class MeetingMinutesApp:
 
         prompt = f"""以下是音频转文字的原始文件，请做一下格式整理：
 
-【重要原则】完整保留原文所有内容，不要做任何删减、总结、压缩或改写。原始文本中的每一句话、每个语气词（如"嗯""对吧""对不对"）、每个口语表达都要保留。
+【重要原则】完整保留原文所有有效内容，不要做任何删减、总结、压缩或改写。原始文本中的每一句话、每个口语表达都要保留。
+【噪声处理】ASR识别可能产生重复的语气词（如连续的"对"），请消除这些重复噪声，但保留正常对话中的语气词（如"嗯""对吧""对不对"）。
 {time_instruction}
 具体要求：
-1、将连续相关的句子合并成段落，但不要合并不同主题的内容
-2、每个段落保留一个时间戳，格式为 [MM:SS-MM:SS]，如 [15:09-16:34]
-3、每个段落的时间戳前面加4个空格，时间戳与段落文本之间空一格，如：    [15:09-16:34] 这是合并后的段落内容...
-4、语义完整且主题相关的几句话合并为一个段落，段落之间用空行分隔
-5、按简体中文输出，补充必要的标点符号（句号、逗号等）
-6、口语化的语气词（嗯、对吧、对不对等）必须保留，它们是对话的自然组成部分
+1、按语义适当分段，每个段落不宜过长（建议2-5句话为一个段落），便于阅读
+2、将连续相关的句子合并成段落，但不要合并不同主题的内容
+3、每个段落保留一个时间戳，格式为 [MM:SS-MM:SS]，如 [15:09-16:34]
+4、每个段落的时间戳前面加4个空格，时间戳与段落文本之间空一格，如：    [15:09-16:34] 这是合并后的段落内容...
+5、语义完整且主题相关的几句话合并为一个段落，段落之间用空行分隔
+6、按简体中文输出，补充必要的标点符号（句号、逗号等）
+7、消除连续重复的"对"字（如"对对对""对对对"），只保留一个；但保留正常对话中的"对"（如"对，是的"）
+8、口语化的语气词（嗯、对吧、对不对等）必须保留，它们是对话的自然组成部分
 
 原始文本：
 """
