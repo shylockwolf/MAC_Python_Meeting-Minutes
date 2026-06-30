@@ -174,10 +174,10 @@ class MeetingMinutesApp:
         self.current_audio_path = None
         # 模型选项: 显示名称 -> (模型类型, 相对路径)
         self.asr_model_options = {
-            "whisper-small (mlx)": ("mlx_whisper", "../../myMLX/whisper-small-mlx"),
             "Qwen3-ASR-0.6B-8bit": ("qwen3", "../../myMLX/Qwen3-ASR-0.6B-8bit"),
+            "whisper-small (mlx)": ("mlx_whisper", "../../myMLX/whisper-small-mlx"),
         }
-        self.selected_model = tk.StringVar(value="whisper-small (mlx)")
+        self.selected_model = tk.StringVar(value="Qwen3-ASR-0.6B-8bit")
         self.transcribe_process = None
         self.log_queue = None
         self.result_queue = None
@@ -258,7 +258,7 @@ class MeetingMinutesApp:
 
     def get_current_model_info(self):
         model_name = self.selected_model.get()
-        return self.asr_model_options.get(model_name, ("mlx_whisper", "../../myMLX/whisper-small-mlx"))
+        return self.asr_model_options.get(model_name, ("qwen3", "../../myMLX/Qwen3-ASR-0.6B-8bit"))
 
     def _get_model_speed_factor(self):
         """获取当前模型的预估速度因子（实时速度的倍数）"""
@@ -382,14 +382,14 @@ class MeetingMinutesApp:
         try:
             api_key = os.getenv('DEEPSEEK_API_KEY')
             api_url = os.getenv('DEEPSEEK_API_URL', 'https://api.deepseek.com/v1')
-            model = os.getenv('DEEPSEEK_MODEL', 'deepseek-v4-flash')
+            model = 'deepseek-v4-flash'
 
             self.log("正在连接 DeepSeek API...")
 
             client = OpenAI(
                 api_key=api_key,
                 base_url=api_url,
-                timeout=httpx.Timeout(300.0, connect=30.0)
+                timeout=httpx.Timeout(600.0, connect=30.0)
             )
 
             content = self.current_text_content
@@ -516,15 +516,20 @@ class MeetingMinutesApp:
                     {"role": "user", "content": full_prompt}
                 ],
                 temperature=0.7,
-                max_tokens=384000
+                max_tokens=16000
             )
 
             formatted_text = response.choices[0].message.content
 
             if not formatted_text or len(formatted_text.strip()) == 0:
-                self.log("  警告: API 返回内容为空")
-                if hasattr(response.choices[0].message, 'reasoning_content'):
-                    formatted_text = response.choices[0].message.reasoning_content
+                self.log("  警告: API 返回 content 为空")
+                reasoning_content = getattr(response.choices[0].message, 'reasoning_content', None)
+                if reasoning_content and len(reasoning_content.strip()) > 0:
+                    self.log("  检测到 reasoning_content，尝试使用...")
+                    formatted_text = reasoning_content
+                else:
+                    self.log("  错误: content 和 reasoning_content 均为空")
+                    raise ValueError("API 返回内容为空（content 和 reasoning_content 均无有效内容）")
 
             self.log(f"  ✓ 完成，返回长度: {len(formatted_text)} 字符")
             return formatted_text
@@ -541,9 +546,16 @@ class MeetingMinutesApp:
                         {"role": "user", "content": full_prompt}
                     ],
                     temperature=0.7,
-                    max_tokens=384000
+                    max_tokens=16000
                 )
                 formatted_text = response.choices[0].message.content
+                if not formatted_text or len(formatted_text.strip()) == 0:
+                    self.log("  备用模型返回 content 为空，尝试 reasoning_content...")
+                    reasoning_content = getattr(response.choices[0].message, 'reasoning_content', None)
+                    if reasoning_content and len(reasoning_content.strip()) > 0:
+                        formatted_text = reasoning_content
+                    else:
+                        raise ValueError("备用模型返回内容为空")
                 self.log(f"  ✓ 备用模型完成，返回长度: {len(formatted_text)} 字符")
                 return formatted_text
             else:
@@ -597,7 +609,7 @@ class MeetingMinutesApp:
             client = OpenAI(
                 api_key=api_key,
                 base_url=api_url,
-                timeout=httpx.Timeout(300.0, connect=30.0)
+                timeout=httpx.Timeout(600.0, connect=30.0)
             )
 
             # 使用成文后的内容
@@ -742,14 +754,14 @@ class MeetingMinutesApp:
         try:
             api_key = os.getenv('DEEPSEEK_API_KEY')
             api_url = os.getenv('DEEPSEEK_API_URL', 'https://api.deepseek.com/v1')
-            model = os.getenv('DEEPSEEK_MODEL', 'deepseek-v4-flash')
+            model = 'deepseek-v4-flash'
             
             self.log("正在连接 DeepSeek API...")
             
             client = OpenAI(
                 api_key=api_key,
                 base_url=api_url,
-                timeout=httpx.Timeout(300.0, connect=30.0)
+                timeout=httpx.Timeout(600.0, connect=30.0)
             )
             
             # 获取所有待处理的文件
@@ -1077,15 +1089,20 @@ class MeetingMinutesApp:
                     {"role": "user", "content": full_prompt}
                 ],
                 temperature=0.7,
-                max_tokens=384000
+                max_tokens=16000
             )
             
             formatted_text = response.choices[0].message.content
             
             if not formatted_text or len(formatted_text.strip()) == 0:
-                self.log("  警告: API 返回内容为空")
-                if hasattr(response.choices[0].message, 'reasoning_content'):
-                    formatted_text = response.choices[0].message.reasoning_content
+                self.log("  警告: API 返回 content 为空")
+                reasoning_content = getattr(response.choices[0].message, 'reasoning_content', None)
+                if reasoning_content and len(reasoning_content.strip()) > 0:
+                    self.log("  检测到 reasoning_content，尝试使用...")
+                    formatted_text = reasoning_content
+                else:
+                    self.log("  错误: content 和 reasoning_content 均为空")
+                    raise ValueError("API 返回内容为空（content 和 reasoning_content 均无有效内容）")
             
             self.log(f"  ✓ 完成，返回长度: {len(formatted_text)} 字符")
             return formatted_text
@@ -1102,9 +1119,16 @@ class MeetingMinutesApp:
                         {"role": "user", "content": full_prompt}
                     ],
                     temperature=0.7,
-                    max_tokens=384000
+                    max_tokens=16000
                 )
                 formatted_text = response.choices[0].message.content
+                if not formatted_text or len(formatted_text.strip()) == 0:
+                    self.log("  备用模型返回 content 为空，尝试 reasoning_content...")
+                    reasoning_content = getattr(response.choices[0].message, 'reasoning_content', None)
+                    if reasoning_content and len(reasoning_content.strip()) > 0:
+                        formatted_text = reasoning_content
+                    else:
+                        raise ValueError("备用模型返回内容为空")
                 self.log(f"  ✓ 备用模型完成，返回长度: {len(formatted_text)} 字符")
                 return formatted_text
             else:
@@ -1181,7 +1205,7 @@ class MeetingMinutesApp:
             client = OpenAI(
                 api_key=api_key,
                 base_url=api_url,
-                timeout=httpx.Timeout(300.0, connect=30.0)
+                timeout=httpx.Timeout(600.0, connect=30.0)
             )
             
             # 使用成文后的内容，如果没有则使用原始内容
@@ -1291,7 +1315,7 @@ class MeetingMinutesApp:
             client = OpenAI(
                 api_key=api_key,
                 base_url=api_url,
-                timeout=httpx.Timeout(300.0, connect=30.0)
+                timeout=httpx.Timeout(600.0, connect=30.0)
             )
 
             # 使用成文后的内容，如果没有则使用原始内容
@@ -1410,15 +1434,20 @@ class MeetingMinutesApp:
                     {"role": "user", "content": full_prompt}
                 ],
                 temperature=0.8,
-                max_tokens=384000
+                max_tokens=16000
             )
 
             podcast_text = response.choices[0].message.content
 
             if not podcast_text or len(podcast_text.strip()) == 0:
-                self.log("  警告: API 返回内容为空")
-                if hasattr(response.choices[0].message, 'reasoning_content'):
-                    podcast_text = response.choices[0].message.reasoning_content
+                self.log("  警告: API 返回 content 为空")
+                reasoning_content = getattr(response.choices[0].message, 'reasoning_content', None)
+                if reasoning_content and len(reasoning_content.strip()) > 0:
+                    self.log("  检测到 reasoning_content，尝试使用...")
+                    podcast_text = reasoning_content
+                else:
+                    self.log("  错误: content 和 reasoning_content 均为空")
+                    raise ValueError("API 返回内容为空（content 和 reasoning_content 均无有效内容）")
 
             self.log(f"  ✓ 第 {chunk_index}/{total_chunks} 段完成，返回长度: {len(podcast_text)} 字符")
             return podcast_text
@@ -1468,19 +1497,24 @@ class MeetingMinutesApp:
                     {"role": "user", "content": full_prompt}
                 ],
                 temperature=0.7,
-                max_tokens=384000
+                max_tokens=16000
             )
             
             summary = response.choices[0].message.content
             
             if not summary or len(summary.strip()) == 0:
-                self.log("    警告: API 返回内容为空")
-                if hasattr(response.choices[0].message, 'reasoning_content'):
-                    summary = response.choices[0].message.reasoning_content
+                self.log("    警告: API 返回 content 为空")
+                reasoning_content = getattr(response.choices[0].message, 'reasoning_content', None)
+                if reasoning_content and len(reasoning_content.strip()) > 0:
+                    self.log("    检测到 reasoning_content，尝试使用...")
+                    summary = reasoning_content
+                else:
+                    self.log("    错误: content 和 reasoning_content 均为空")
+                    raise ValueError("API 返回内容为空（content 和 reasoning_content 均无有效内容）")
             
             self.log(f"    ✓ 摘要完成，长度: {len(summary)} 字符")
             return summary
-            
+
         except Exception as e:
             self.log(f"    ✗ 摘要生成失败: {e}")
             # 尝试使用备用模型
@@ -1493,14 +1527,21 @@ class MeetingMinutesApp:
                         {"role": "user", "content": full_prompt}
                     ],
                     temperature=0.7,
-                    max_tokens=384000
+                    max_tokens=16000
                 )
                 summary = response.choices[0].message.content
+                if not summary or len(summary.strip()) == 0:
+                    self.log("    备用模型返回 content 为空，尝试 reasoning_content...")
+                    reasoning_content = getattr(response.choices[0].message, 'reasoning_content', None)
+                    if reasoning_content and len(reasoning_content.strip()) > 0:
+                        summary = reasoning_content
+                    else:
+                        raise ValueError("备用模型返回内容为空")
                 self.log(f"    ✓ 备用模型完成，长度: {len(summary)} 字符")
                 return summary
             else:
                 raise
-    
+
     def _integrate_summaries(self, client, model, prompt_template, all_summaries):
         """整合所有摘要生成完整会议纪要"""
         integrate_prompt = """以下是会议的分段摘要，请合并为一份完整的会议纪要：
@@ -1527,15 +1568,20 @@ class MeetingMinutesApp:
                     {"role": "user", "content": full_prompt}
                 ],
                 temperature=0.7,
-                max_tokens=384000
+                max_tokens=16000
             )
             
             minutes_text = response.choices[0].message.content
             
             if not minutes_text or len(minutes_text.strip()) == 0:
-                self.log("  警告: API 返回内容为空")
-                if hasattr(response.choices[0].message, 'reasoning_content'):
-                    minutes_text = response.choices[0].message.reasoning_content
+                self.log("  警告: API 返回 content 为空")
+                reasoning_content = getattr(response.choices[0].message, 'reasoning_content', None)
+                if reasoning_content and len(reasoning_content.strip()) > 0:
+                    self.log("  检测到 reasoning_content，尝试使用...")
+                    minutes_text = reasoning_content
+                else:
+                    self.log("  错误: content 和 reasoning_content 均为空")
+                    raise ValueError("API 返回内容为空（content 和 reasoning_content 均无有效内容）")
             
             self.log(f"  ✓ 整合完成，会议纪要长度: {len(minutes_text)} 字符")
             return minutes_text
@@ -1552,9 +1598,16 @@ class MeetingMinutesApp:
                         {"role": "user", "content": full_prompt}
                     ],
                     temperature=0.7,
-                    max_tokens=384000
+                    max_tokens=16000
                 )
                 minutes_text = response.choices[0].message.content
+                if not minutes_text or len(minutes_text.strip()) == 0:
+                    self.log("  备用模型返回 content 为空，尝试 reasoning_content...")
+                    reasoning_content = getattr(response.choices[0].message, 'reasoning_content', None)
+                    if reasoning_content and len(reasoning_content.strip()) > 0:
+                        minutes_text = reasoning_content
+                    else:
+                        raise ValueError("备用模型返回内容为空")
                 self.log(f"  ✓ 备用模型完成，长度: {len(minutes_text)} 字符")
                 return minutes_text
             else:
@@ -1574,15 +1627,20 @@ class MeetingMinutesApp:
                     {"role": "user", "content": full_prompt}
                 ],
                 temperature=0.7,
-                max_tokens=384000
+                max_tokens=16000
             )
             
             minutes_text = response.choices[0].message.content
             
             if not minutes_text or len(minutes_text.strip()) == 0:
-                self.log("  警告: API 返回内容为空")
-                if hasattr(response.choices[0].message, 'reasoning_content'):
-                    minutes_text = response.choices[0].message.reasoning_content
+                self.log("  警告: API 返回 content 为空")
+                reasoning_content = getattr(response.choices[0].message, 'reasoning_content', None)
+                if reasoning_content and len(reasoning_content.strip()) > 0:
+                    self.log("  检测到 reasoning_content，尝试使用...")
+                    minutes_text = reasoning_content
+                else:
+                    self.log("  错误: content 和 reasoning_content 均为空")
+                    raise ValueError("API 返回内容为空（content 和 reasoning_content 均无有效内容）")
             
             self.log(f"  ✓ 完成，返回长度: {len(minutes_text)} 字符")
             return minutes_text
@@ -1599,14 +1657,21 @@ class MeetingMinutesApp:
                         {"role": "user", "content": full_prompt}
                     ],
                     temperature=0.7,
-                    max_tokens=384000
+                    max_tokens=16000
                 )
                 minutes_text = response.choices[0].message.content
+                if not minutes_text or len(minutes_text.strip()) == 0:
+                    self.log("  备用模型返回 content 为空，尝试 reasoning_content...")
+                    reasoning_content = getattr(response.choices[0].message, 'reasoning_content', None)
+                    if reasoning_content and len(reasoning_content.strip()) > 0:
+                        minutes_text = reasoning_content
+                    else:
+                        raise ValueError("备用模型返回内容为空")
                 self.log(f"  ✓ 备用模型完成，返回长度: {len(minutes_text)} 字符")
                 return minutes_text
             else:
                 raise
-    
+
     def _save_minutes(self, minutes_text):
         """保存会议纪要（仅PDF格式）"""
         try:

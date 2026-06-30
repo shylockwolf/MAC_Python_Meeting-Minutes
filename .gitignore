@@ -1,0 +1,50 @@
+# 环境变量文件
+.env
+
+# Python 编译文件
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# 临时文件
+*.tmp
+*.temp
+*.log
+
+# macOS 系统文件
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# 音频文件（原始和处理后的）
+*.mp3
+*.wav
+*.m4a
+*.flac
+*.ogg
+
+# 输出文本文件（转录结果等）
+*_成文.txt
+*_会议纪要.txt
+*_播客.txt
+
+# 模型文件
+myMLX/
+*.bin
+
+# 虚拟环境
+venv/
+.env/
+.venv/
+
+# 编辑器配置
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 操作系统文件
+Thumbs.db
