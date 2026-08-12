@@ -134,7 +134,7 @@ def transcribe_worker(audio_path, model_type, model_path, result_queue, log_queu
             # mlx-audio 返回的 segments 只有一个整段，转为与 mlx_whisper 相同格式
             transcript = result_obj.text.strip() if hasattr(result_obj, 'text') else ""
             mlx_segments = result_obj.segments if hasattr(result_obj, 'segments') else []
-            
+
             # 构建与 mlx_whisper 相同的格式
             segments_list = []
             if mlx_segments:
@@ -152,6 +152,52 @@ def transcribe_worker(audio_path, model_type, model_path, result_queue, log_queu
 
             result = {"text": transcript, "segments": segments_list}
             log_queue.put(f"{prefix}Qwen3-ASR 转录完成: {transcript[:100]}...")
+
+        elif model_type == "audio8":
+            log_queue.put(f"{prefix}调用 Audio8-ASR (ONNX) 转录...")
+            import sys
+            # 将 Audio8 模型目录加入路径
+            audio8_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), model_path))
+            if audio8_dir not in sys.path:
+                sys.path.insert(0, audio8_dir)
+            from transcribe_file import transcribe_file as audio8_transcribe
+
+            bundle_dir = os.path.join(audio8_dir, "model_bundle")
+            log_queue.put(f"{prefix}Audio8 模型目录: {bundle_dir}")
+            log_queue.put(f"{prefix}开始转录（首次加载可能较慢）...")
+
+            audio8_result = audio8_transcribe(
+                audio_path,
+                bundle_dir=bundle_dir,
+                backend="onnx_cache",
+                cache_precision="int8",
+                audio_precision="int8",
+                language="zh",
+                max_new_tokens=120,
+            )
+
+            transcript = audio8_result.get("text", "").strip()
+
+            # Audio8 默认返回整段文本，需要估算时长
+            # 尝试从结果中获取时长信息
+            audio_duration_sec = audio8_result.get("duration", 0)
+            if not audio_duration_sec:
+                # 尝试通过音频文件获取时长
+                try:
+                    import soundfile as sf
+                    info = sf.info(audio_path)
+                    audio_duration_sec = info.duration
+                except Exception:
+                    audio_duration_sec = 900  # 默认 15 分钟
+
+            segments_list = [{
+                'start': time_offset,
+                'end': time_offset + audio_duration_sec,
+                'text': transcript
+            }]
+
+            result = {"text": transcript, "segments": segments_list}
+            log_queue.put(f"{prefix}Audio8-ASR 转录完成: {transcript[:100]}...")
         else:
             raise ValueError(f"未知模型类型: {model_type}")
 
@@ -176,6 +222,7 @@ class MeetingMinutesApp:
         self.asr_model_options = {
             "Qwen3-ASR-0.6B-8bit": ("qwen3", "../../myMLX/Qwen3-ASR-0.6B-8bit"),
             "whisper-small (mlx)": ("mlx_whisper", "../../myMLX/whisper-small-mlx"),
+            "Audio8-ASR-0.1B-onnx": ("audio8", "../../myMLX/Audio8-ASR-0.1B-onnx-runtime"),
         }
         self.selected_model = tk.StringVar(value="Qwen3-ASR-0.6B-8bit")
         self.transcribe_process = None
@@ -265,8 +312,14 @@ class MeetingMinutesApp:
         model_name = self.selected_model.get()
         # mlx_whisper 在 Apple Silicon 上约 10x 实时速度
         # Qwen3-ASR 8bit 约 7x 实时速度（含模型加载开销）
-        if "qwen" in model_name.lower():
+        # Audio8-ASR ONNX INT8 CPU 推理约 14x 实时速度（实测 30秒音频用 2.17 秒）
+        # 注：Audio8 max_total_len=512，prompt 385 tokens，只能输出约 127 tokens
+        #    每次最多处理约 30 秒音频（受模型 token 限制）
+        model_name_lower = model_name.lower()
+        if "qwen" in model_name_lower:
             return 7
+        elif "audio8" in model_name_lower or "onnx" in model_name_lower:
+            return 14
         else:
             return 10
 
@@ -2392,9 +2445,21 @@ class MeetingMinutesApp:
             return
         
         self.log("正在检查音频文件...")
-        
+
         # 分割音频文件（带进度显示）
-        self.segments = split_audio_with_progress(self.current_audio_path, log_callback=self.log)
+        # Audio8 模型 max_total_len=512，prompt 占 385 tokens，只能输出约 127 tokens
+        # 约对应 30 秒音频（受模型 token 限制）
+        model_type_check, _ = self.get_current_model_info()
+        if "audio8" in model_type_check.lower() or "onnx" in model_type_check.lower():
+            segment_duration = 30  # Audio8 模型用 30 秒分段
+            self.log("Audio8 模型使用 30 秒分段（受 max_tokens 限制）")
+        else:
+            segment_duration = 900  # 其他模型用 15 分钟分段
+        self.segments = split_audio_with_progress(
+            self.current_audio_path,
+            log_callback=self.log,
+            segment_duration=segment_duration
+        )
         if self.segments is None:
             self.log("错误: 无法分割音频文件，请检查文件格式")
             self.reset_ui()
