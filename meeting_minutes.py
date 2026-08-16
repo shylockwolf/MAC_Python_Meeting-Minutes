@@ -9,7 +9,6 @@ import tempfile
 import shutil
 import multiprocessing as mp
 from multiprocessing import Queue, Process
-import mlx_whisper
 from pathlib import Path
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -97,6 +96,7 @@ def transcribe_worker(audio_path, model_type, model_path, result_queue, log_queu
         prefix = f"[片段{segment_index+1}] " if segment_index is not None else ""
 
         if model_type == "mlx_whisper":
+            import mlx_whisper
             log_queue.put(f"{prefix}调用 mlx_whisper.transcribe()...")
             result = mlx_whisper.transcribe(
                 audio_path,
@@ -215,8 +215,11 @@ class MeetingMinutesApp:
         self.root = root
         self.root.title("会议纪要 - 语音转文字")
         self.root.geometry("800x600")
-        
+
         self.transcribing = False
+
+        # 启动时后台清理 /tmp 下残留的旧音频切片目录（程序上次异常退出留下的）
+        threading.Thread(target=self._purge_stale_temp_dirs, daemon=True).start()
         self.current_audio_path = None
         # 模型选项: 显示名称 -> (模型类型, 相对路径)
         self.asr_model_options = {
@@ -294,9 +297,19 @@ class MeetingMinutesApp:
         self.log_text.pack(expand=True, fill=tk.BOTH, padx=10, pady=10)
         
     def log(self, message):
-        self.log_text.insert(tk.END, message + "\n")
-        self.log_text.see(tk.END)
-        self.root.update()
+        # 在非 Tk 主线程调用时，把日志投递到主线程的事件循环里，避免竞态
+        def _do():
+            self.log_text.insert(tk.END, message + "\n")
+            self.log_text.see(tk.END)
+            self.root.update_idletasks()
+        try:
+            if threading.current_thread() is not threading.main_thread():
+                self.root.after(0, _do)
+            else:
+                _do()
+        except Exception:
+            # Tk 已销毁时（关闭窗口后）静默
+            pass
 
     def on_model_changed(self, event=None):
         model_name = self.selected_model.get()
@@ -429,6 +442,28 @@ class MeetingMinutesApp:
         thread = threading.Thread(target=self._formatting_worker_one_click)
         thread.daemon = True
         thread.start()
+
+    def _call_chat(self, client, model, messages, temperature, max_tokens):
+        """调用 DeepSeek ChatCompletions，禁用思考模式以确保 content 字段始终是最终回答。
+
+        V4 系列默认开启 thinking，会同时返回 reasoning_content（思考过程）和 content。
+        一旦发生内容审查/拒绝等情况，content 会变成空字符串，旧的代码会错误地
+        把 thinking 当成结果保存。本方法强制关闭 thinking，content 为空就是真错误。
+        """
+        return client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            extra_body={"thinking": {"type": "disabled"}},
+        )
+
+    def _extract_content(self, response):
+        """从 API 响应中提取 content，空内容视为错误。"""
+        content = response.choices[0].message.content
+        if not content or len(content.strip()) == 0:
+            raise ValueError("API 返回 content 为空")
+        return content
 
     def _formatting_worker_one_click(self):
         """成文工作线程（一键模式）"""
@@ -569,28 +604,17 @@ class MeetingMinutesApp:
         self.log(f"  发送请求 (长度: {len(full_prompt)} 字符)...")
 
         try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
+            response = self._call_chat(
+                client,
+                model,
+                [
                     {"role": "system", "content": "你是一个专业的文本编辑助手，擅长整理和优化语音转文字的文本。"},
                     {"role": "user", "content": full_prompt}
                 ],
                 temperature=0.7,
-                max_tokens=16000
+                max_tokens=16000,
             )
-
-            formatted_text = response.choices[0].message.content
-
-            if not formatted_text or len(formatted_text.strip()) == 0:
-                self.log("  警告: API 返回 content 为空")
-                reasoning_content = getattr(response.choices[0].message, 'reasoning_content', None)
-                if reasoning_content and len(reasoning_content.strip()) > 0:
-                    self.log("  检测到 reasoning_content，尝试使用...")
-                    formatted_text = reasoning_content
-                else:
-                    self.log("  错误: content 和 reasoning_content 均为空")
-                    raise ValueError("API 返回内容为空（content 和 reasoning_content 均无有效内容）")
-
+            formatted_text = self._extract_content(response)
             self.log(f"  ✓ 完成，返回长度: {len(formatted_text)} 字符")
             return formatted_text
 
@@ -599,23 +623,17 @@ class MeetingMinutesApp:
             # 尝试使用备用模型
             if model != 'deepseek-v4-flash':
                 self.log("  尝试使用 deepseek-v4-flash 模型...")
-                response = client.chat.completions.create(
-                    model='deepseek-v4-flash',
-                    messages=[
+                response = self._call_chat(
+                    client,
+                    'deepseek-v4-flash',
+                    [
                         {"role": "system", "content": "你是一个专业的文本编辑助手，擅长整理和优化语音转文字的文本。"},
                         {"role": "user", "content": full_prompt}
                     ],
                     temperature=0.7,
-                    max_tokens=16000
+                    max_tokens=16000,
                 )
-                formatted_text = response.choices[0].message.content
-                if not formatted_text or len(formatted_text.strip()) == 0:
-                    self.log("  备用模型返回 content 为空，尝试 reasoning_content...")
-                    reasoning_content = getattr(response.choices[0].message, 'reasoning_content', None)
-                    if reasoning_content and len(reasoning_content.strip()) > 0:
-                        formatted_text = reasoning_content
-                    else:
-                        raise ValueError("备用模型返回内容为空")
+                formatted_text = self._extract_content(response)
                 self.log(f"  ✓ 备用模型完成，返回长度: {len(formatted_text)} 字符")
                 return formatted_text
             else:
@@ -1191,53 +1209,36 @@ class MeetingMinutesApp:
         self.log(f"  发送请求 (长度: {len(full_prompt)} 字符)...")
         
         try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
+            response = self._call_chat(
+                client,
+                model,
+                [
                     {"role": "system", "content": "你是一个专业的文本编辑助手，擅长整理和优化语音转文字的文本。"},
                     {"role": "user", "content": full_prompt}
                 ],
                 temperature=0.7,
-                max_tokens=16000
+                max_tokens=16000,
             )
-            
-            formatted_text = response.choices[0].message.content
-            
-            if not formatted_text or len(formatted_text.strip()) == 0:
-                self.log("  警告: API 返回 content 为空")
-                reasoning_content = getattr(response.choices[0].message, 'reasoning_content', None)
-                if reasoning_content and len(reasoning_content.strip()) > 0:
-                    self.log("  检测到 reasoning_content，尝试使用...")
-                    formatted_text = reasoning_content
-                else:
-                    self.log("  错误: content 和 reasoning_content 均为空")
-                    raise ValueError("API 返回内容为空（content 和 reasoning_content 均无有效内容）")
-            
+            formatted_text = self._extract_content(response)
             self.log(f"  ✓ 完成，返回长度: {len(formatted_text)} 字符")
             return formatted_text
-            
+
         except Exception as e:
             self.log(f"  ✗ 调用失败: {e}")
             # 尝试使用备用模型
             if model != 'deepseek-v4-flash':
                 self.log("  尝试使用 deepseek-v4-flash 模型...")
-                response = client.chat.completions.create(
-                    model='deepseek-v4-flash',
-                    messages=[
+                response = self._call_chat(
+                    client,
+                    'deepseek-v4-flash',
+                    [
                         {"role": "system", "content": "你是一个专业的文本编辑助手，擅长整理和优化语音转文字的文本。"},
                         {"role": "user", "content": full_prompt}
                     ],
                     temperature=0.7,
-                    max_tokens=16000
+                    max_tokens=16000,
                 )
-                formatted_text = response.choices[0].message.content
-                if not formatted_text or len(formatted_text.strip()) == 0:
-                    self.log("  备用模型返回 content 为空，尝试 reasoning_content...")
-                    reasoning_content = getattr(response.choices[0].message, 'reasoning_content', None)
-                    if reasoning_content and len(reasoning_content.strip()) > 0:
-                        formatted_text = reasoning_content
-                    else:
-                        raise ValueError("备用模型返回内容为空")
+                formatted_text = self._extract_content(response)
                 self.log(f"  ✓ 备用模型完成，返回长度: {len(formatted_text)} 字符")
                 return formatted_text
             else:
@@ -1536,28 +1537,17 @@ class MeetingMinutesApp:
         self.log(f"  发送请求 (长度: {len(full_prompt)} 字符)...")
 
         try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
+            response = self._call_chat(
+                client,
+                model,
+                [
                     {"role": "system", "content": "你是一位资深的播客内容策划和编辑专家，擅长将会议或访谈内容转化为精彩的播客节目。"},
                     {"role": "user", "content": full_prompt}
                 ],
                 temperature=0.8,
-                max_tokens=16000
+                max_tokens=16000,
             )
-
-            podcast_text = response.choices[0].message.content
-
-            if not podcast_text or len(podcast_text.strip()) == 0:
-                self.log("  警告: API 返回 content 为空")
-                reasoning_content = getattr(response.choices[0].message, 'reasoning_content', None)
-                if reasoning_content and len(reasoning_content.strip()) > 0:
-                    self.log("  检测到 reasoning_content，尝试使用...")
-                    podcast_text = reasoning_content
-                else:
-                    self.log("  错误: content 和 reasoning_content 均为空")
-                    raise ValueError("API 返回内容为空（content 和 reasoning_content 均无有效内容）")
-
+            podcast_text = self._extract_content(response)
             self.log(f"  ✓ 第 {chunk_index}/{total_chunks} 段完成，返回长度: {len(podcast_text)} 字符")
             return podcast_text
 
@@ -1599,28 +1589,17 @@ class MeetingMinutesApp:
         self.log(f"    发送摘要请求 (长度: {len(full_prompt)} 字符)...")
         
         try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
+            response = self._call_chat(
+                client,
+                model,
+                [
                     {"role": "system", "content": "你是一个专业的会议分析助手，擅长提取会议关键信息。"},
                     {"role": "user", "content": full_prompt}
                 ],
                 temperature=0.7,
-                max_tokens=16000
+                max_tokens=16000,
             )
-            
-            summary = response.choices[0].message.content
-            
-            if not summary or len(summary.strip()) == 0:
-                self.log("    警告: API 返回 content 为空")
-                reasoning_content = getattr(response.choices[0].message, 'reasoning_content', None)
-                if reasoning_content and len(reasoning_content.strip()) > 0:
-                    self.log("    检测到 reasoning_content，尝试使用...")
-                    summary = reasoning_content
-                else:
-                    self.log("    错误: content 和 reasoning_content 均为空")
-                    raise ValueError("API 返回内容为空（content 和 reasoning_content 均无有效内容）")
-            
+            summary = self._extract_content(response)
             self.log(f"    ✓ 摘要完成，长度: {len(summary)} 字符")
             return summary
 
@@ -1629,23 +1608,17 @@ class MeetingMinutesApp:
             # 尝试使用备用模型
             if model != 'deepseek-v4-flash':
                 self.log("    尝试使用 deepseek-v4-flash 模型...")
-                response = client.chat.completions.create(
-                    model='deepseek-v4-flash',
-                    messages=[
+                response = self._call_chat(
+                    client,
+                    'deepseek-v4-flash',
+                    [
                         {"role": "system", "content": "你是一个专业的会议分析助手，擅长提取会议关键信息。"},
                         {"role": "user", "content": full_prompt}
                     ],
                     temperature=0.7,
-                    max_tokens=16000
+                    max_tokens=16000,
                 )
-                summary = response.choices[0].message.content
-                if not summary or len(summary.strip()) == 0:
-                    self.log("    备用模型返回 content 为空，尝试 reasoning_content...")
-                    reasoning_content = getattr(response.choices[0].message, 'reasoning_content', None)
-                    if reasoning_content and len(reasoning_content.strip()) > 0:
-                        summary = reasoning_content
-                    else:
-                        raise ValueError("备用模型返回内容为空")
+                summary = self._extract_content(response)
                 self.log(f"    ✓ 备用模型完成，长度: {len(summary)} 字符")
                 return summary
             else:
@@ -1670,53 +1643,36 @@ class MeetingMinutesApp:
         self.log(f"  发送整合请求 (摘要总长度: {len(all_summaries)} 字符)...")
         
         try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
+            response = self._call_chat(
+                client,
+                model,
+                [
                     {"role": "system", "content": "你是一个专业的会议记录员，擅长整合信息并生成结构化的会议纪要。"},
                     {"role": "user", "content": full_prompt}
                 ],
                 temperature=0.7,
-                max_tokens=16000
+                max_tokens=16000,
             )
-            
-            minutes_text = response.choices[0].message.content
-            
-            if not minutes_text or len(minutes_text.strip()) == 0:
-                self.log("  警告: API 返回 content 为空")
-                reasoning_content = getattr(response.choices[0].message, 'reasoning_content', None)
-                if reasoning_content and len(reasoning_content.strip()) > 0:
-                    self.log("  检测到 reasoning_content，尝试使用...")
-                    minutes_text = reasoning_content
-                else:
-                    self.log("  错误: content 和 reasoning_content 均为空")
-                    raise ValueError("API 返回内容为空（content 和 reasoning_content 均无有效内容）")
-            
+            minutes_text = self._extract_content(response)
             self.log(f"  ✓ 整合完成，会议纪要长度: {len(minutes_text)} 字符")
             return minutes_text
-            
+
         except Exception as e:
             self.log(f"  ✗ 整合失败: {e}")
             # 尝试使用备用模型
             if model != 'deepseek-v4-flash':
                 self.log("  尝试使用 deepseek-v4-flash 模型...")
-                response = client.chat.completions.create(
-                    model='deepseek-v4-flash',
-                    messages=[
+                response = self._call_chat(
+                    client,
+                    'deepseek-v4-flash',
+                    [
                         {"role": "system", "content": "你是一个专业的会议记录员，擅长整合信息并生成结构化的会议纪要。"},
                         {"role": "user", "content": full_prompt}
                     ],
                     temperature=0.7,
-                    max_tokens=16000
+                    max_tokens=16000,
                 )
-                minutes_text = response.choices[0].message.content
-                if not minutes_text or len(minutes_text.strip()) == 0:
-                    self.log("  备用模型返回 content 为空，尝试 reasoning_content...")
-                    reasoning_content = getattr(response.choices[0].message, 'reasoning_content', None)
-                    if reasoning_content and len(reasoning_content.strip()) > 0:
-                        minutes_text = reasoning_content
-                    else:
-                        raise ValueError("备用模型返回内容为空")
+                minutes_text = self._extract_content(response)
                 self.log(f"  ✓ 备用模型完成，长度: {len(minutes_text)} 字符")
                 return minutes_text
             else:
@@ -1729,53 +1685,36 @@ class MeetingMinutesApp:
         self.log(f"  发送请求 (长度: {len(full_prompt)} 字符)...")
         
         try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
+            response = self._call_chat(
+                client,
+                model,
+                [
                     {"role": "system", "content": "你是一个专业的会议记录员，擅长从会议文本中提取关键信息并生成结构化的会议纪要。"},
                     {"role": "user", "content": full_prompt}
                 ],
                 temperature=0.7,
-                max_tokens=16000
+                max_tokens=16000,
             )
-            
-            minutes_text = response.choices[0].message.content
-            
-            if not minutes_text or len(minutes_text.strip()) == 0:
-                self.log("  警告: API 返回 content 为空")
-                reasoning_content = getattr(response.choices[0].message, 'reasoning_content', None)
-                if reasoning_content and len(reasoning_content.strip()) > 0:
-                    self.log("  检测到 reasoning_content，尝试使用...")
-                    minutes_text = reasoning_content
-                else:
-                    self.log("  错误: content 和 reasoning_content 均为空")
-                    raise ValueError("API 返回内容为空（content 和 reasoning_content 均无有效内容）")
-            
+            minutes_text = self._extract_content(response)
             self.log(f"  ✓ 完成，返回长度: {len(minutes_text)} 字符")
             return minutes_text
-            
+
         except Exception as e:
             self.log(f"  ✗ 调用失败: {e}")
             # 尝试使用备用模型
             if model != 'deepseek-v4-flash':
                 self.log("  尝试使用 deepseek-v4-flash 模型...")
-                response = client.chat.completions.create(
-                    model='deepseek-v4-flash',
-                    messages=[
+                response = self._call_chat(
+                    client,
+                    'deepseek-v4-flash',
+                    [
                         {"role": "system", "content": "你是一个专业的会议记录员，擅长从会议文本中提取关键信息并生成结构化的会议纪要。"},
                         {"role": "user", "content": full_prompt}
                     ],
                     temperature=0.7,
-                    max_tokens=16000
+                    max_tokens=16000,
                 )
-                minutes_text = response.choices[0].message.content
-                if not minutes_text or len(minutes_text.strip()) == 0:
-                    self.log("  备用模型返回 content 为空，尝试 reasoning_content...")
-                    reasoning_content = getattr(response.choices[0].message, 'reasoning_content', None)
-                    if reasoning_content and len(reasoning_content.strip()) > 0:
-                        minutes_text = reasoning_content
-                    else:
-                        raise ValueError("备用模型返回内容为空")
+                minutes_text = self._extract_content(response)
                 self.log(f"  ✓ 备用模型完成，返回长度: {len(minutes_text)} 字符")
                 return minutes_text
             else:
@@ -2426,6 +2365,9 @@ class MeetingMinutesApp:
         self.open_button.config(state=tk.DISABLED)
         self.start_time = time.time()
 
+        # 先清理上次可能残留的临时切片（异常退出时不会被清）
+        self.cleanup_temp_files()
+
         self.log(f"\n{'='*50}")
         self.log(f"开始处理音频: {self.current_audio_path}")
         model_name = self.selected_model.get()
@@ -2455,30 +2397,37 @@ class MeetingMinutesApp:
             self.log("Audio8 模型使用 30 秒分段（受 max_tokens 限制）")
         else:
             segment_duration = 900  # 其他模型用 15 分钟分段
-        self.segments = split_audio_with_progress(
-            self.current_audio_path,
-            log_callback=self.log,
-            segment_duration=segment_duration
-        )
-        if self.segments is None:
-            self.log("错误: 无法分割音频文件，请检查文件格式")
-            self.reset_ui()
-            return
-        
-        self.total_segments = len(self.segments)
-        self.current_segment = 0
-        self.all_results = []
-        
-        if self.total_segments > 1:
-            self.log(f"\n音频分割详情:")
-            for i, (path, start, end) in enumerate(self.segments):
-                duration = end - start
-                self.log(f"  片段{i+1}: {start:.0f}s - {end:.0f}s ({duration:.0f}秒)")
-        else:
-            self.log("音频时长较短，无需分割")
-        
-        self.log(f"\n总共 {self.total_segments} 个片段，开始转录...")
-        self.process_next_segment()
+        self.log("正在后台分割音频，主线程不会卡顿...")
+
+        def _do_split_and_run():
+            self.segments = split_audio_with_progress(
+                self.current_audio_path,
+                log_callback=self.log,
+                segment_duration=segment_duration
+            )
+            if self.segments is None:
+                self.log("错误: 无法分割音频文件，请检查文件格式")
+                self.reset_ui()
+                return
+
+            self.total_segments = len(self.segments)
+            self.current_segment = 0
+            self.all_results = []
+
+            if self.total_segments > 1:
+                self.temp_dir = os.path.dirname(self.segments[0][0])
+                self.log(f"\n音频分割详情:")
+                for i, (path, start, end) in enumerate(self.segments):
+                    duration = end - start
+                    self.log(f"  片段{i+1}: {start:.0f}s - {end:.0f}s ({duration:.0f}秒)")
+            else:
+                # 单片段（音频较短）时不会创建 temp_dir；保持上次记录以便兜底清理
+                self.log("音频时长较短，无需分割")
+
+            self.log(f"\n总共 {self.total_segments} 个片段，开始转录...")
+            self.process_next_segment()
+
+        threading.Thread(target=_do_split_and_run, daemon=True).start()
         
     def monitor_transcription(self):
         check_interval = 1
@@ -2689,23 +2638,52 @@ class MeetingMinutesApp:
         if hasattr(self, 'one_click_mode') and self.one_click_mode:
             self.root.after(1000, self._on_transcription_complete_for_one_click)
         
+    def _purge_stale_temp_dirs(self):
+        """后台清理 /tmp 下属于本脚本的残留切片目录。
+
+        tempfile.mkdtemp() 默认生成 /tmp/tmpXXXXXX，本脚本生成的目录下必有 segment_*.wav。
+        通过"目录里是否含 segment_*.wav"来识别，无风险地清理陈旧目录（修改时间 > 1 小时）。
+        """
+        import time as _time
+        tmp_root = tempfile.gettempdir()
+        try:
+            now = _time.time()
+            for entry in os.listdir(tmp_root):
+                full = os.path.join(tmp_root, entry)
+                if not (entry.startswith('tmp') and os.path.isdir(full)):
+                    continue
+                try:
+                    if now - os.path.getmtime(full) < 3600:
+                        # 1 小时以内的目录不碰，避免影响正在运行的本进程
+                        continue
+                    has_segment = any(name.startswith('segment_') and name.endswith('.wav')
+                                      for name in os.listdir(full))
+                    if has_segment:
+                        shutil.rmtree(full)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     def cleanup_temp_files(self):
-        if self.segments and len(self.segments) > 1:
+        # 清理单条 segment 文件（已知路径的情况）
+        if self.segments:
             for segment_path, _, _ in self.segments:
                 try:
                     if os.path.exists(segment_path):
                         os.remove(segment_path)
-                except Exception as e:
+                except Exception:
                     pass
-            
-            temp_dir = os.path.dirname(self.segments[0][0]) if self.segments else None
-            if temp_dir and os.path.exists(temp_dir):
-                try:
-                    shutil.rmtree(temp_dir)
-                    self.log("临时文件已清理")
-                except Exception as e:
-                    pass
-        
+
+        # 兜底：清理整个临时目录（包括 ffmpeg 临时文件、异常退出残留）
+        if self.temp_dir and os.path.isdir(self.temp_dir):
+            try:
+                shutil.rmtree(self.temp_dir)
+                self.log("临时文件已清理")
+            except Exception:
+                pass
+
+        self.temp_dir = None
         self.segments = []
         self.all_results = []
         
@@ -2796,6 +2774,7 @@ class MeetingMinutesApp:
                     self.log(f"终止进程时出错: {e}")
                     
             self.log("操作已中断")
+            self.cleanup_temp_files()
             self.reset_ui()
             
     def reset_ui(self):
@@ -2820,6 +2799,8 @@ class MeetingMinutesApp:
         if self.transcribing:
             self.log("正在处理中，停止处理并退出...")
             self.stop_transcription()
+        # 兜底清理临时切片
+        self.cleanup_temp_files()
         self.root.destroy()
 
 def main():
